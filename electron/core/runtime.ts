@@ -32,7 +32,12 @@ type Identity = z.infer<typeof identitySchema>
 export class Runtime extends EventEmitter {
   state!: Snapshot
   readonly display: DisplayController
-  pointer?: { validate(): void; hasRetainedDisplay(): boolean; land(): Promise<void> }
+  pointer?: {
+    validate(): void
+    hasRetainedDisplay(): boolean
+    land(): Promise<void>
+    crossToPeer?(position: number): Promise<void>
+  }
   private engine: DeskflowEngine
   private server?: Server
   private link?: SecureChannel
@@ -49,6 +54,10 @@ export class Runtime extends EventEmitter {
   private cancelKeyboard?: () => void
   private publishTimer?: NodeJS.Timeout
   private accessibilityCheck?: Promise<boolean>
+  private sessionShortcut = ''
+  get switchShortcut() {
+    return this.state.config.role === 'host' ? this.state.config.shortcut : this.sessionShortcut
+  }
   get layout() {
     return this.state.config.role === 'host'
       ? { hostSide: this.state.config.layoutSide, video: this.state.config.crossScreenVideo }
@@ -347,6 +356,7 @@ export class Runtime extends EventEmitter {
           this.state.config.role === 'host'
             ? this.layout
             : { hostSide: id.layoutSide, video: id.crossScreenVideo }
+        this.sessionShortcut = this.state.config.role === 'client' ? id.shortcut : ''
         this.state.connected = true
         this.publish()
         this.trace('identity.saved', { peer: this.state.peer })
@@ -498,6 +508,7 @@ export class Runtime extends EventEmitter {
       clearInterval(this.heartbeat)
       this.state.connected = false
       this.state.sessionLayout = null
+      this.sessionShortcut = ''
       this.state.peer = null
       this.state.activeDeviceId = null
       this.state.displayDeviceId = null
@@ -634,7 +645,7 @@ export class Runtime extends EventEmitter {
       )
     }
   }
-  private async keyboardSwitch(targetId: string) {
+  private async keyboardSwitch(targetId: string, cross?: () => Promise<void>) {
     if (!this.state.connected || this.state.engine !== 'ready' || this.pendingEngine)
       throw new Error('键鼠共享尚未就绪')
     if (this.state.switching || this.keyboardPending) throw new Error('正在切换，请稍后')
@@ -688,12 +699,13 @@ export class Runtime extends EventEmitter {
           reject(new Error('共享会话已结束'))
         }
         this.on('transition', listener)
-        this.display
-          .injectTarget(targetId === this.state.deviceId ? 'host' : 'peer')
-          .catch((error) => {
-            cleanup()
-            reject(error)
-          })
+        const send =
+          cross ??
+          (() => this.display.injectTarget(targetId === this.state.deviceId ? 'host' : 'peer'))
+        send().catch((error) => {
+          cleanup()
+          reject(error)
+        })
       })
     } finally {
       this.keyboardPending = false
@@ -744,7 +756,7 @@ export class Runtime extends EventEmitter {
       }
     }
   }
-  async switchKeyboardToPeer() {
+  async switchKeyboardToPeer(position?: number) {
     if (
       !this.pointerMode ||
       this.commandInFlight ||
@@ -752,10 +764,25 @@ export class Runtime extends EventEmitter {
       !this.state.peer
     )
       return
-    if (this.state.config.role === 'host') await this.keyboardSwitch(this.state.peer.id)
-    else await this.link!.request('cross-screen', null, 15000)
+    if (this.state.config.role === 'host') {
+      const pointer = this.pointer
+      if (position !== undefined && pointer?.crossToPeer) {
+        if (!Number.isFinite(position) || position < 0 || position > 1)
+          throw new Error('跨屏位置无效')
+        this.trace('pointer.edgeCrossing', { position, side: this.layout?.hostSide })
+        await this.keyboardSwitch(this.state.peer.id, () => pointer.crossToPeer!(position))
+      } else await this.keyboardSwitch(this.state.peer.id)
+    } else await this.link!.request('cross-screen', null, 15000)
   }
-  async toggleDisplay() {
+  async toggleDisplay(source: 'button' | 'shortcut' = 'button') {
+    this.trace('display.toggleRequested', {
+      source,
+      activeDeviceId: this.state.activeDeviceId,
+      displayDeviceId: this.state.displayDeviceId,
+      switching: this.state.switching,
+      commandInFlight: this.commandInFlight,
+      keyboardPending: this.keyboardPending,
+    })
     const local = this.state.displayDeviceId === this.state.deviceId
     await this.switchTo(
       local ||
@@ -789,6 +816,7 @@ export class Runtime extends EventEmitter {
     this.state.listening = false
     this.state.connected = false
     this.state.sessionLayout = null
+    this.sessionShortcut = ''
     this.state.peer = null
     this.link?.close()
     this.link = undefined

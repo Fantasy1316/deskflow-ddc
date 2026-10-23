@@ -28,7 +28,13 @@ public static class ScreenBridgeNative {
   [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
   public static void Position(int x, int y) {
     var previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
-    try { if(!SetCursorPos(x,y)) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+    try {
+      if(!SetCursorPos(x,y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      // Deliver motion through the low-level hook as well as positioning the OS
+      // cursor, so Deskflow observes a provider-side native edge crossing.
+      var move = new Input { type=0, union=new InputUnion { mouse=new Mouse { flags=1 } } };
+      if(SendInput(1,new Input[] {move},Marshal.SizeOf(typeof(Input))) != 1) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
     finally { if(previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous); }
   }
   public static void Hotkey(bool host) {

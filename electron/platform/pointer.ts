@@ -1,7 +1,12 @@
 import { globalShortcut, screen } from 'electron'
 import type { Runtime } from '../core/runtime.js'
 import type { ScreenSide } from '../../src/shared/types.js'
-import { contains, crossesSharedEdge, type Point } from '../core/pointer-geometry.js'
+import {
+  contains,
+  desktopExitPoint,
+  sharedEdgePosition,
+  type Point,
+} from '../core/pointer-geometry.js'
 
 const opposite: Record<ScreenSide, ScreenSide> = {
   left: 'right',
@@ -74,8 +79,8 @@ export class PointerBridge {
     const state = this.runtime.state
     const enabled = this.runtime.pointerMode && state.connected && state.engine === 'ready'
     const wanted =
-      enabled && state.config.role === 'host' && this.runtime.layout?.video === 'keep'
-        ? state.config.shortcut
+      enabled && state.activeDeviceId === state.deviceId && this.runtime.layout?.video === 'keep'
+        ? this.runtime.switchShortcut
             .replace('control', 'Control')
             .replace('alt', 'Alt')
             .replace('shift', 'Shift')
@@ -109,8 +114,16 @@ export class PointerBridge {
     let registered = false
     try {
       registered = globalShortcut.register(wanted, () => {
+        // Deskflow can swallow OS hotkeys on the provider while forwarding input.
+        // Only the current input owner handles the shared shortcut on either end.
+        if (
+          !this.runtime.state.connected ||
+          this.runtime.state.engine !== 'ready' ||
+          this.runtime.state.activeDeviceId !== this.runtime.state.deviceId
+        )
+          return
         void this.runtime
-          .toggleDisplay()
+          .toggleDisplay('shortcut')
           .catch((error) => this.runtime.log('error', error.message, error))
       })
     } catch {
@@ -157,16 +170,35 @@ export class PointerBridge {
     const point = screen.getCursorScreenPoint(),
       previous = this.previous
     this.previous = point
-    if (previous && crossesSharedEdge(previous, point, selected.bounds, side)) {
+    const position = previous
+      ? sharedEdgePosition(previous, point, selected.bounds, side)
+      : undefined
+    if (position !== undefined) {
       this.previous = undefined
       this.cooldown = Date.now() + 600
       void this.runtime
-        .switchKeyboardToPeer()
+        .switchKeyboardToPeer(position)
         .catch((error) => this.runtime.log('error', error.message, error))
     } else if (!contains(selected.bounds, point)) {
       // The OS can retain the inactive shared desktop in its aggregate bounds.
       void this.land().catch((error) => this.runtime.log('error', error.message, error))
     }
+  }
+  async crossToPeer(position: number) {
+    const side = this.side
+    if (!side || this.runtime.state.config.role !== 'host' || !this.hasRetainedDisplay())
+      throw new Error('当前不能从独立屏幕跨出')
+    const point = desktopExitPoint(
+      screen.getAllDisplays().map((d) => d.bounds),
+      side,
+      position,
+    )
+    this.previous = undefined
+    this.cooldown = Date.now() + 600
+    // A native edge transition updates Deskflow's own cursor state. Warping only
+    // the receiver would snap back on its next absolute mouse update.
+    const target = this.runtime.state.platform === 'win32' ? screen.dipToScreenPoint(point) : point
+    await this.runtime.display.landOnScreen(target)
   }
   async land() {
     if (this.moving) return

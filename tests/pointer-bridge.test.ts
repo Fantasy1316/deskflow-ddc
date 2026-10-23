@@ -42,6 +42,7 @@ function setup(role = 'host', platform = 'darwin') {
   ]
   const runtime = Object.assign(new EventEmitter(), {
     pointerMode: true,
+    switchShortcut: 'control+alt+F10',
     layout: { hostSide: 'left', video: 'keep' },
     state: {
       platform,
@@ -137,6 +138,29 @@ describe('platform-neutral independent display cursor bridge', () => {
     expect(runtime.display.landOnScreen).toHaveBeenCalledWith({ x: 1488, y: 500 })
     disconnect(runtime)
   })
+  it.each(['darwin', 'win32'])(
+    'reaches the native outer edge on a %s provider at the source seam fraction',
+    async (platform) => {
+      vi.useFakeTimers()
+      const { runtime, bridge } = setup('host', platform)
+      desktop.displays.push({
+        id: 43,
+        label: 'Shared panel',
+        internal: false,
+        bounds: { x: 1512, y: 0, width: 1920, height: 1080 },
+      })
+      desktop.scale = platform === 'win32' ? 2 : 1
+      for (const fraction of [0.1, 0.5, 0.9]) {
+        await bridge.crossToPeer(fraction)
+        expect(runtime.display.landOnScreen).toHaveBeenLastCalledWith({
+          x: 3431 * desktop.scale,
+          y: fraction * 1079 * desktop.scale,
+        })
+      }
+      expect(runtime.switchKeyboardToPeer).not.toHaveBeenCalled()
+      disconnect(runtime)
+    },
+  )
   it('does not transfer at the independent seam while the shared monitor shows this computer', async () => {
     vi.useFakeTimers()
     const { runtime } = setup()
@@ -152,7 +176,7 @@ describe('platform-neutral independent display cursor bridge', () => {
     expect(runtime.toggleDisplay).toHaveBeenCalledTimes(1)
     disconnect(runtime)
   })
-  it('reverses the host layout on the receiver and leaves its public hotkey to the host', async () => {
+  it('reverses the host layout and handles the shared hotkey on the active receiver', async () => {
     vi.useFakeTimers()
     const { runtime } = setup('client', 'win32')
     desktop.cursor = { x: 40, y: 300 }
@@ -160,9 +184,29 @@ describe('platform-neutral independent display cursor bridge', () => {
     desktop.cursor = { x: 0, y: 300 }
     await vi.advanceTimersByTimeAsync(16)
     expect(runtime.switchKeyboardToPeer).toHaveBeenCalledOnce()
-    expect(desktop.register).not.toHaveBeenCalled()
+    expect(desktop.register).toHaveBeenCalledWith('Control+Alt+F10', expect.any(Function))
+    const handler = desktop.register.mock.calls[0]?.[1] as (() => void) | undefined
+    handler?.()
+    expect(runtime.toggleDisplay).toHaveBeenCalledWith('shortcut')
     disconnect(runtime)
   })
+  it.each(['host', 'client'])(
+    'releases the %s hotkey when input leaves and ignores its stale callback',
+    (role) => {
+      vi.useFakeTimers()
+      const { runtime } = setup(role)
+      const handler = desktop.register.mock.calls[0]?.[1] as (() => void) | undefined
+      runtime.state.activeDeviceId = 'peer'
+      runtime.emit('control-state')
+      expect(desktop.unregister).toHaveBeenCalledWith('Control+Alt+F10')
+      handler?.()
+      expect(runtime.toggleDisplay).not.toHaveBeenCalled()
+      runtime.state.activeDeviceId = 'local'
+      runtime.emit('control-state')
+      expect(desktop.register).toHaveBeenCalledTimes(2)
+      disconnect(runtime)
+    },
+  )
   it('lands on an external Windows panel with negative coordinates and physical DPI conversion', async () => {
     vi.useFakeTimers()
     const { runtime, bridge } = setup('client', 'win32')

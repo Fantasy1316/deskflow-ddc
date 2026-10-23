@@ -435,6 +435,58 @@ describe('two actual control-channel runtimes with simulated hardware', () => {
     ])
     expect(host.state.displayDeviceId).toBe(ids[0])
   })
+  it('uses the host shortcut on the receiver and coordinates a video return over the control channel', async () => {
+    const { host, client, ids, code, engine } = await createPair()
+    host.state.config.shortcut = 'control+alt+F10'
+    client.state.config.shortcut = 'control+alt+F11'
+    host.state.config.crossScreenVideo = 'keep'
+    host.state.config.layoutSide = 'left'
+    expect(client.switchShortcut).toBe('')
+    await host.start()
+    await client.start(code)
+    await waitFor(() => host.state.engine === 'ready' && client.state.engine === 'ready')
+    expect(host.switchShortcut).toBe('control+alt+F10')
+    expect(client.switchShortcut).toBe('control+alt+F10')
+    expect(client.state.config.shortcut).toBe('control+alt+F11')
+    const outbound = host.toggleDisplay('shortcut')
+    engine.emit('switch', { from: ids[0], to: ids[1] })
+    await outbound
+    await waitFor(() => client.state.displayDeviceId === ids[1] && !client.state.switching)
+    const inbound = client.toggleDisplay('shortcut')
+    await waitFor(() => mocks.injections.includes('host'))
+    engine.emit('switch', { from: ids[1], to: ids[0] })
+    await inbound
+    expect(mocks.writes).toEqual([
+      { machine: 'Mac', input: 1 },
+      { machine: 'Windows', input: 3 },
+    ])
+    await waitFor(() => client.state.displayDeviceId === ids[0] && !client.state.switching)
+    await client.stop()
+    expect(client.switchShortcut).toBe('')
+  })
+  it('uses a native edge crossing with its fraction instead of a remembered hotkey jump', async () => {
+    const { host, client, ids, code, engine } = await createPair()
+    host.state.config.crossScreenVideo = 'keep'
+    host.state.config.retainedDisplayId = 'internal'
+    host.state.config.layoutSide = 'left'
+    const crossToPeer = vi.fn(async (_position: number) => {
+      engine.emit('switch', { from: ids[0], to: ids[1] })
+    })
+    host.pointer = { validate() {}, hasRetainedDisplay: () => true, async land() {}, crossToPeer }
+    await host.start()
+    await client.start(code)
+    await waitFor(() => host.state.engine === 'ready' && client.state.engine === 'ready')
+    for (const position of [0.1, 0.5, 0.9]) {
+      await host.switchKeyboardToPeer(position)
+      expect(crossToPeer).toHaveBeenLastCalledWith(position)
+      expect(host.state.activeDeviceId).toBe(ids[1])
+      engine.emit('switch', { from: ids[1], to: ids[0] })
+      await waitFor(() => host.state.activeDeviceId === ids[0] && !host.state.switching)
+    }
+    expect(mocks.injections).toEqual([])
+    // Keyboard-only round trips keep the shared panel on the receiver.
+    expect(mocks.writes).toEqual([{ machine: 'Mac', input: 1 }])
+  })
   it('allows the built-in seam to transfer keyboard control without issuing a video command', async () => {
     const { host, client, ids, code, engine } = await createPair()
     host.state.config.crossScreenVideo = 'keep'

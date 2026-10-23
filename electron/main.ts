@@ -90,6 +90,34 @@ else {
     .whenReady()
     .then(async () => {
       restoreProductName()
+      if (process.platform === 'darwin') {
+        // Electron's default menu may have captured the legacy keychain name
+        // before ready. Rebuild it after restoring the visible product name.
+        app.setAboutPanelOptions({ applicationName: 'Deskflow DDC' })
+        Menu.setApplicationMenu(
+          Menu.buildFromTemplate([
+            {
+              label: 'Deskflow DDC',
+              submenu: [
+                { role: 'about', label: 'About Deskflow DDC' },
+                { type: 'separator' },
+                { role: 'services' },
+                { type: 'separator' },
+                { role: 'hide', label: 'Hide Deskflow DDC' },
+                { role: 'hideOthers' },
+                { role: 'unhide' },
+                { type: 'separator' },
+                { role: 'quit', label: 'Quit Deskflow DDC' },
+              ],
+            },
+            { role: 'fileMenu' },
+            { role: 'editMenu' },
+            { role: 'viewMenu' },
+            { role: 'windowMenu' },
+            { role: 'help', submenu: [] },
+          ]),
+        )
+      }
       const dataDir = join(app.getPath('userData'), 'screenbridge-v1')
       diagnostics = new DiagnosticLog(join(dataDir, 'logs'))
       diagnostics.record('info', 'app.start', environment())
