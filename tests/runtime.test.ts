@@ -138,6 +138,34 @@ async function pair(reverse = false, saveIdentity = async (_role: 'host' | 'clie
   return result
 }
 describe('two actual control-channel runtimes with simulated hardware', () => {
+  it('refreshes live permissions without saving, restarting sharing or issuing input commands', async () => {
+    const { host } = await pair()
+    const save = vi.spyOn(host.store, 'save')
+    let finish!: (value: boolean) => void
+    const check = vi.spyOn(host.display, 'checkAccessibility').mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve
+        }),
+    )
+    const starts = mocks.starts.length
+    const first = host.refreshAccessibility()
+    expect(host.refreshAccessibility()).toBe(first)
+    expect(check).toHaveBeenCalledOnce()
+    finish(false)
+    await first
+    expect(host.state.dependencies.accessibility).toBe(false)
+    check.mockResolvedValueOnce(true)
+    await host.refreshAccessibility()
+    expect(host.state.dependencies.accessibility).toBe(true)
+    expect(host.state.running).toBe(true)
+    expect(host.state.connected).toBe(true)
+    expect(host.state.engine).toBe('ready')
+    expect(save).not.toHaveBeenCalled()
+    expect(mocks.starts).toHaveLength(starts)
+    expect(mocks.writes).toHaveLength(0)
+    expect(mocks.injections).toHaveLength(0)
+  })
   it('rejects unsupported platforms before engine or network startup', async () => {
     const { host } = await createPair()
     host.state.platform = 'linux'

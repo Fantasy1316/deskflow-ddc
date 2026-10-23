@@ -4,7 +4,7 @@ import AppIcon from './AppIcon.vue'
 import PointerSettings from './PointerSettings.vue'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
-const props = defineProps<{ state: Snapshot; busy: boolean }>()
+const props = defineProps<{ state: Snapshot; busy: boolean; checkingAccessibility: boolean }>()
 const emit = defineEmits<{ action: [action: Action] }>()
 const { draft, value } = useConfigDraft(() => props.state.config)
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
@@ -201,11 +201,18 @@ const label = (value: string) =>
       <div v-if="state.platform === 'darwin'" class="dependency-row">
         <div>
           <strong>辅助功能权限</strong>
-          <p>Deskflow DDC 用于发送切换键；Deskflow 用于共享键鼠，两者都需授权。</p>
+          <p>检测本应用的切换权限，返回应用时自动刷新；Deskflow 的键鼠共享权限需单独开启。</p>
         </div>
         <span :class="['badge', state.dependencies.accessibility ? 'success' : 'neutral']">{{
-          state.dependencies.accessibility ? '已授权' : '待检查'
+          state.dependencies.accessibility ? '已授权' : '未检测到授权'
         }}</span
+        ><button
+          class="button secondary compact"
+          :disabled="busy"
+          :aria-busy="checkingAccessibility"
+          @click="emit('action', { type: 'checkAccessibility' })"
+        >
+          {{ checkingAccessibility ? '检测中…' : '重新检测' }}</button
         ><button
           class="button secondary compact"
           :disabled="busy"

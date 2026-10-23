@@ -3,13 +3,14 @@ import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../electron/core/store'
+import { safeStorage } from 'electron'
 
 vi.mock('electron', () => ({
   safeStorage: {
     isEncryptionAvailable: () => false,
-    decryptString: () => {
+    decryptString: vi.fn(() => {
       throw new Error('keychain unavailable')
-    },
+    }),
   },
 }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -29,6 +30,34 @@ async function setup() {
   return store
 }
 describe('atomic configuration store', () => {
+  it('loads an encrypted legacy identity without changing pairing or settings', async () => {
+    const store = await setup()
+    const file = join(store.dir, 'settings.json')
+    const disk = JSON.parse(await readFile(file, 'utf8'))
+    disk.secretEncrypted = true
+    disk.secret = Buffer.from('ciphertext fixture').toString('base64')
+    const text = JSON.stringify(disk)
+    await writeFile(file, text)
+    vi.mocked(safeStorage.decryptString).mockReturnValueOnce(store.value.pairingCode)
+    const loaded = new Store(store.dir)
+    await loaded.load()
+    expect(loaded.value).toEqual(store.value)
+    expect(await readFile(file, 'utf8')).toBe(text)
+  })
+  it('keeps encrypted settings intact and reports the underlying keychain failure', async () => {
+    const store = await setup()
+    const file = join(store.dir, 'settings.json')
+    const disk = JSON.parse(await readFile(file, 'utf8'))
+    disk.secretEncrypted = true
+    disk.secret = Buffer.from('ciphertext fixture').toString('base64')
+    const text = JSON.stringify(disk)
+    await writeFile(file, text)
+    const error = await new Store(store.dir).load().catch((error: Error) => error)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('解密配对密钥')
+    expect((error as Error).cause).toMatchObject({ message: 'keychain unavailable' })
+    expect(await readFile(file, 'utf8')).toBe(text)
+  })
   it('serializes concurrent saves with snapshots, unique temps and last-call ordering', async () => {
     const store = await setup(),
       writes: Promise<void>[] = []

@@ -27,17 +27,36 @@ export class Store {
   constructor(public dir: string) {}
   async load() {
     await mkdir(this.dir, { recursive: true })
+    let stage = '读取配置文件'
     try {
       const disk = JSON.parse(await readFile(join(this.dir, 'settings.json'), 'utf8'))
+      stage = '解密配对密钥'
       const pairingCode = disk.secretEncrypted
         ? safeStorage.decryptString(Buffer.from(disk.secret, 'base64'))
         : disk.secret
+      stage = '校验设备身份'
       const identity = diskIdentity.parse(disk)
+      stage = '校验配对密钥'
       decodePairingCode(pairingCode)
+      stage = '校验设备设置'
       this.value = { ...identity, config: configSchema.parse(disk.config), pairingCode }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-        throw new Error('无法读取已保存的配置，请检查设置文件；为避免丢失配对信息，未自动覆盖。')
+      if (stage !== '读取配置文件' || (error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // Zod errors can contain rejected input. Record only paths and issue codes.
+        const cause =
+          error instanceof z.ZodError
+            ? new Error(
+                error.issues.map((issue) => `${issue.path.join('.')}: ${issue.code}`).join('; '),
+              )
+            : error
+        throw new Error(
+          `无法读取已保存的配置（${stage}）；为避免丢失配对信息，未自动覆盖。` +
+            (stage === '解密配对密钥'
+              ? '请确认 macOS 钥匙串或 Windows 凭据访问可用，并允许应用访问原有密钥。'
+              : ''),
+          { cause },
+        )
+      }
       this.value = {
         id: randomUUID(),
         config: defaults(hostname().slice(0, 48)),

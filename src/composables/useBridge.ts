@@ -47,6 +47,7 @@ export function useBridge() {
   const state = shallowRef<Snapshot>(previewSnapshot())
   const loading = shallowRef(true),
     busy = shallowRef(false),
+    pendingAction = shallowRef<Action['type'] | null>(null),
     notice = shallowRef(''),
     noticeError = shallowRef(false)
   let unsubscribe: (() => void) | undefined, timer: ReturnType<typeof setTimeout> | undefined
@@ -61,6 +62,7 @@ export function useBridge() {
   async function act(action: Action) {
     if (busy.value) return false
     busy.value = true
+    pendingAction.value = action.type
     try {
       if (!window.screenbridge) {
         if (action.type === 'save') {
@@ -71,6 +73,7 @@ export function useBridge() {
         await window.screenbridge.act(action)
         if (action.type === 'save') notify('设置已保存')
         if (action.type === 'copyPairing') notify('配对码已复制')
+        if (action.type === 'checkAccessibility') notify('权限检测已完成')
       }
       return true
     } catch (error) {
@@ -84,6 +87,7 @@ export function useBridge() {
       return false
     } finally {
       busy.value = false
+      pendingAction.value = null
     }
   }
   const displayConfigured = computed(
@@ -111,5 +115,5 @@ export function useBridge() {
     unsubscribe?.()
     clearTimeout(timer)
   })
-  return { state, loading, busy, notice, noticeError, displayConfigured, act }
+  return { state, loading, busy, pendingAction, notice, noticeError, displayConfigured, act }
 }

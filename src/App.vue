@@ -9,7 +9,8 @@ import SharingPanel from './components/SharingPanel.vue'
 import ActivityPanel from './components/ActivityPanel.vue'
 import { useBridge } from './composables/useBridge'
 import { version } from '../package.json'
-const { state, loading, busy, notice, noticeError, displayConfigured, act } = useBridge()
+const { state, loading, busy, pendingAction, notice, noticeError, displayConfigured, act } =
+  useBridge()
 const page = shallowRef('dashboard')
 const nav = [
   { id: 'dashboard', label: '工作台', icon: 'dashboard' },
@@ -100,7 +101,13 @@ const on = computed(() => state.value.connected && state.value.engine === 'ready
           />
           <PairingPanel v-else-if="page === 'pairing'" :state="state" :busy="busy" @action="act" />
           <DisplayPanel v-else-if="page === 'display'" :state="state" :busy="busy" @action="act" />
-          <SharingPanel v-else-if="page === 'sharing'" :state="state" :busy="busy" @action="act" />
+          <SharingPanel
+            v-else-if="page === 'sharing'"
+            :state="state"
+            :busy="busy"
+            :checking-accessibility="pendingAction === 'checkAccessibility'"
+            @action="act"
+          />
           <ActivityPanel
             v-else
             :logs="state.logs"

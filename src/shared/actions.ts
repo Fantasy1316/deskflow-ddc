@@ -14,6 +14,7 @@ export const actionSchema = z.discriminatedUnion('type', [
       'rotatePairing',
       'copyPairing',
       'openAccessibility',
+      'checkAccessibility',
       'openDataFolder',
       'exportDiagnostics',
       'openLogFolder',

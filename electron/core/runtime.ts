@@ -48,6 +48,7 @@ export class Runtime extends EventEmitter {
   private keyboardPending = false
   private cancelKeyboard?: () => void
   private publishTimer?: NodeJS.Timeout
+  private accessibilityCheck?: Promise<boolean>
   get layout() {
     return this.state.config.role === 'host'
       ? { hostSide: this.state.config.layoutSide, video: this.state.config.crossScreenVideo }
@@ -148,11 +149,28 @@ export class Runtime extends EventEmitter {
     ].slice(0, 160)
     this.publish()
   }
+  refreshAccessibility(): Promise<boolean> {
+    if (this.accessibilityCheck) return this.accessibilityCheck
+    this.accessibilityCheck = this.display
+      .checkAccessibility()
+      .then((accessibility) => {
+        if (this.state.dependencies.accessibility !== accessibility) {
+          this.state.dependencies = { ...this.state.dependencies, accessibility }
+          this.publish()
+          this.trace('accessibility.checked', { accessibility })
+        }
+        return accessibility
+      })
+      .finally(() => {
+        this.accessibilityCheck = undefined
+      })
+    return this.accessibilityCheck
+  }
   async refreshDependencies() {
     const [deskflow, displayControl, accessibility] = await Promise.all([
       findDeskflow(this.state.config.deskflowPath),
       this.display.available(),
-      this.display.checkAccessibility(),
+      this.refreshAccessibility(),
     ])
     this.state.dependencies = { deskflow: !!deskflow, displayControl, accessibility }
     this.publish()

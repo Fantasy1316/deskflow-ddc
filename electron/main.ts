@@ -21,14 +21,9 @@ import { trayImage } from './platform/tray.js'
 import { actionSchema, unreachableAction } from '../src/shared/actions.js'
 import { closeMainWindow, assertRendererSender } from './core/window-lifecycle.js'
 import { DiagnosticLog, diagnosticSnapshot } from './core/diagnostics.js'
+import { configureApplicationIdentity } from './core/app-identity.js'
 
-// Keep existing pairing identities when upgrading from the former application name.
-app.setName('Deskflow DDC')
-const appData = app.getPath('appData')
-const existingData = ['Deskflow DDC', 'ScreenBridge', 'screenbridge']
-  .map((name) => join(appData, name))
-  .find((path) => existsSync(join(path, 'screenbridge-v1', 'settings.json')))
-app.setPath('userData', existingData ?? join(appData, 'Deskflow DDC'))
+const restoreProductName = configureApplicationIdentity(app)
 
 const here = dirname(fileURLToPath(import.meta.url))
 let window: BrowserWindow | undefined, tray: Tray | undefined, runtime: Runtime | undefined
@@ -94,6 +89,7 @@ else {
   app
     .whenReady()
     .then(async () => {
+      restoreProductName()
       const dataDir = join(app.getPath('userData'), 'screenbridge-v1')
       diagnostics = new DiagnosticLog(join(dataDir, 'logs'))
       diagnostics.record('info', 'app.start', environment())
@@ -121,6 +117,15 @@ else {
         },
       })
       if (process.platform === 'win32') window.removeMenu()
+      if (process.platform === 'darwin') {
+        window.on('focus', () => {
+          void runtime!
+            .refreshAccessibility()
+            .catch((error) =>
+              runtime!.log('error', '无法刷新辅助功能权限，请稍后重新检测。', error),
+            )
+        })
+      }
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       window.webContents.on('will-navigate', (event) => event.preventDefault())
       const validSender = (event: Electron.IpcMainInvokeEvent) => {
@@ -192,6 +197,16 @@ else {
                 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
               )
               break
+            case 'checkAccessibility': {
+              const granted = await runtime!.refreshAccessibility()
+              runtime!.log(
+                granted ? 'success' : 'info',
+                granted
+                  ? '已检测到本应用的辅助功能授权。Deskflow 的共享权限需单独开启。'
+                  : '未检测到本应用的辅助功能授权，请在系统设置中开启后重新检测。',
+              )
+              break
+            }
             case 'openDataFolder':
               await shell.openPath(runtime!.store.dir)
               break
