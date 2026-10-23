@@ -508,28 +508,54 @@ describe('two actual control-channel runtimes with simulated hardware', () => {
     expect(host.state.displayDeviceId).toBe(ids[1])
     expect(mocks.writes).toEqual([{ machine: 'Mac', input: 1 }])
   })
-  it('makes a native Mac outbound edge visible once and preserves Windows video on subsequent round trips', async () => {
-    const { host, client, ids, code, engine } = await createPair()
-    host.state.config.crossScreenVideo = 'keep'
-    host.state.config.retainedDisplayId = 'internal'
-    host.state.config.layoutSide = 'top'
-    const land = vi.fn(async () => {})
-    host.pointer = { validate() {}, hasRetainedDisplay: () => true, land }
-    await host.start()
-    await client.start(code)
-    await waitFor(() => host.state.engine === 'ready' && client.state.engine === 'ready')
-    engine.emit('switch', { from: ids[0], to: ids[1] })
-    await waitFor(() => host.state.activeDeviceId === ids[1] && !host.state.switching)
-    expect(mocks.writes).toEqual([{ machine: 'Mac', input: 1 }])
-    engine.emit('switch', { from: ids[1], to: ids[0] })
-    await waitFor(() => client.state.activeDeviceId === ids[0] && !client.state.switching)
-    expect(land).toHaveBeenCalledOnce()
-    expect(client.state.displayDeviceId).toBe(ids[1])
-    engine.emit('switch', { from: ids[0], to: ids[1] })
-    await waitFor(() => client.state.activeDeviceId === ids[1] && !client.state.switching)
-    expect(client.state.displayDeviceId).toBe(ids[1])
-    expect(mocks.writes).toHaveLength(1)
-  })
+  it.each(['darwin', 'win32'] as const)(
+    'blocks an unsolicited outer edge on a %s provider without changing video',
+    async (platform) => {
+      const { host, client, ids, code, engine } = await createPair()
+      host.state.platform = platform
+      host.state.config.shortcut = 'control+alt+F10'
+      host.state.config.crossScreenVideo = 'keep'
+      host.state.config.retainedDisplayId = 'internal'
+      host.state.config.layoutSide = 'top'
+      const land = vi.fn(async () => {})
+      const recoverDesktop = vi.fn(async () => {})
+      host.pointer = { validate() {}, hasRetainedDisplay: () => true, land, recoverDesktop }
+      await host.start()
+      await client.start(code)
+      await waitFor(() => host.state.engine === 'ready' && client.state.engine === 'ready')
+      await host.switchTo('local')
+      mocks.writes.length = 0
+      mocks.injections.length = 0
+      engine.emit('switch', { from: ids[0], to: ids[1] })
+      await waitFor(() => mocks.injections.includes('host'))
+      expect(mocks.writes).toEqual([])
+      engine.emit('switch', { from: ids[1], to: ids[0] })
+      await waitFor(() => host.state.activeDeviceId === ids[0] && !host.state.switching)
+      expect(recoverDesktop).toHaveBeenCalledOnce()
+      expect(host.state.displayDeviceId).toBe(ids[0])
+      expect(mocks.writes).toEqual([])
+      // Explicit video commands still work, then native keyboard-only round trips
+      // remain valid while the shared display is already on the receiver.
+      const outbound = host.switchTo('peer')
+      engine.emit('switch', { from: ids[0], to: ids[1] })
+      await outbound
+      expect(mocks.writes).toEqual([{ machine: 'Mac', input: 1 }])
+      await waitFor(
+        () =>
+          client.state.activeDeviceId === ids[1] &&
+          client.state.displayDeviceId === ids[1] &&
+          !client.state.switching,
+      )
+      engine.emit('switch', { from: ids[1], to: ids[0] })
+      await waitFor(() => client.state.activeDeviceId === ids[0] && !client.state.switching)
+      expect(land).toHaveBeenCalledOnce()
+      expect(client.state.displayDeviceId).toBe(ids[1])
+      engine.emit('switch', { from: ids[0], to: ids[1] })
+      await waitFor(() => client.state.activeDeviceId === ids[1] && !client.state.switching)
+      expect(client.state.displayDeviceId).toBe(ids[1])
+      expect(mocks.writes).toHaveLength(1)
+    },
+  )
   it.each([
     ['win32', 'win32'],
     ['win32', 'darwin'],

@@ -239,4 +239,41 @@ export class PointerBridge {
       this.moving = false
     }
   }
+  async recoverDesktop() {
+    const epoch = this.epoch
+    this.moving = true
+    this.previous = undefined
+    this.cooldown = Date.now() + 600
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      const state = this.runtime.state
+      if (
+        epoch !== this.epoch ||
+        !state.connected ||
+        state.engine !== 'ready' ||
+        state.displayStatus === 'uncertain' ||
+        (state.displayDeviceId !== state.deviceId && state.displayDeviceId !== null)
+      )
+        return
+      const current = screen.getCursorScreenPoint()
+      const candidates = screen.getAllDisplays().map(({ bounds: b }) => {
+        const margin = Math.min(24, b.width / 4, b.height / 4)
+        return {
+          x: Math.max(b.x + margin, Math.min(current.x, b.x + b.width - margin)),
+          y: Math.max(b.y + margin, Math.min(current.y, b.y + b.height - margin)),
+        }
+      })
+      const point = candidates.sort(
+        (a, b) =>
+          Math.hypot(a.x - current.x, a.y - current.y) -
+          Math.hypot(b.x - current.x, b.y - current.y),
+      )[0]
+      if (point)
+        await this.runtime.display.landOnScreen(
+          state.platform === 'win32' ? screen.dipToScreenPoint(point) : point,
+        )
+    } finally {
+      this.moving = false
+    }
+  }
 }

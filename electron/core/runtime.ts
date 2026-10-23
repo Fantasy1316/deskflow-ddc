@@ -36,6 +36,7 @@ export class Runtime extends EventEmitter {
     validate(): void
     hasRetainedDisplay(): boolean
     land(): Promise<void>
+    recoverDesktop?(): Promise<void>
     crossToPeer?(position: number): Promise<void>
   }
   private engine: DeskflowEngine
@@ -544,6 +545,20 @@ export class Runtime extends EventEmitter {
             retained &&
             this.state.displayStatus !== 'uncertain' &&
             this.state.displayDeviceId !== null
+          if (
+            this.layout?.video === 'keep' &&
+            from === localId &&
+            this.pointer?.hasRetainedDisplay() &&
+            !retained &&
+            !this.keyboardPending &&
+            this.state.displayDeviceId !== to
+          ) {
+            // A native Deskflow link spans the aggregate desktop, including the
+            // shared panel's outer edge. It must never turn a keyboard-only
+            // crossing into a video command to make an invisible target usable.
+            this.trace('pointer.hiddenTargetBlocked', { from, to })
+            throw new Error('目标电脑当前没有可用画面，已拦截边缘切换；请用快捷键或按钮切换外接屏')
+          }
           if (!keepVideo && this.state.displayDeviceId !== to) {
             await this.writeDisplay(this.state.displayDeviceId ?? from, to)
           }
@@ -569,7 +584,15 @@ export class Runtime extends EventEmitter {
           const observed = (change: Transition) => {
             if (change.to === id) {
               cleanup()
-              resolve()
+              // Leave the native boundary after rollback so another mouse
+              // event cannot immediately trigger the same hidden-target link.
+              if (
+                id === localId &&
+                this.state.displayStatus !== 'uncertain' &&
+                (this.state.displayDeviceId === localId || this.state.displayDeviceId === null)
+              )
+                Promise.resolve(this.pointer?.recoverDesktop?.()).then(resolve, reject)
+              else resolve()
             }
           }
           const timer = setTimeout(() => {

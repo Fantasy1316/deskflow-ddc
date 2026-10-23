@@ -7,9 +7,9 @@ import { X509Certificate } from 'node:crypto'
 import selfsigned from 'selfsigned'
 import type { Config, Peer } from '../../src/shared/types.js'
 import { makeServerConfig, makeSettings, parseSwitch } from './deskflow-config.js'
-import { assertNoRunningEngine, assertPortAvailable } from './engine-preflight.js'
+import { assertNoRunningEngine, assertPortAvailable, deskflowIpcPath } from './engine-preflight.js'
 import { engineLifecycleLine, safeEngineLine } from './engine-log.js'
-import { engineLaunch } from './engine-launch.js'
+import { engineDirectory, engineLaunch } from './engine-launch.js'
 import { stopOwnedProcess } from './process-stop.js'
 import { DiagnosticLines } from './diagnostic-lines.js'
 import { prepareRuntimeCopy } from './runtime-cache.js'
@@ -36,6 +36,7 @@ export async function findDeskflow(custom = '') {
 export class DeskflowEngine extends EventEmitter {
   private child?: ChildProcess
   private ipc?: Socket
+  private ipcReady = false
   private retry?: NodeJS.Timeout
   private watchdog?: NodeJS.Timeout
   private stopping = false
@@ -103,6 +104,8 @@ export class DeskflowEngine extends EventEmitter {
   async assertAvailable(c: Config) {
     if (this.child) throw new Error('键鼠共享进程已经运行')
     await assertNoRunningEngine()
+    const directory = engineDirectory(this.dataDir)
+    if (directory) await assertNoRunningEngine(deskflowIpcPath(directory))
     if (c.role === 'host') await assertPortAvailable(c.deskflowPort)
   }
   private fail(message: string) {
@@ -113,7 +116,6 @@ export class DeskflowEngine extends EventEmitter {
     this.emit('state', 'error')
     this.emit('diagnostic', message)
     // Only stop our child. The global IPC endpoint can belong to another process.
-    this.ipc?.destroy()
     void this.terminate().catch((error) =>
       this.emit('diagnostic', '无法停止故障引擎，已阻止重复启动', error),
     )
@@ -134,7 +136,7 @@ export class DeskflowEngine extends EventEmitter {
     this.stopping = false
     this.failed = false
     this.expectedPeerFingerprint = peer.fingerprint
-    const launch = await engineLaunch()
+    const launch = await engineLaunch(this.dataDir)
     const child = spawn(
       prepared.binary,
       [c.role === 'host' ? 'server' : 'client', '--settings', prepared.settings],
@@ -162,10 +164,10 @@ export class DeskflowEngine extends EventEmitter {
         clearTimeout(this.watchdog)
         this.ipc?.destroy()
         this.ipc = undefined
+        this.ipcReady = false
         this.child = undefined
         this.emit('state', this.stopping ? 'stopped' : 'error')
       }
-      void launch.cleanup().catch((error) => this.emit('trace', 'engine.cleanupFailed', { error }))
     })
     let outputSeen = false,
       ipcReady = false,
@@ -195,9 +197,17 @@ export class DeskflowEngine extends EventEmitter {
           )
           continue
         }
-        if (
-          /an instance of deskflow core is already running|cannot listen for clients/i.test(line)
-        ) {
+        if (/an instance of deskflow core is already running/i.test(line)) {
+          // Qt reports all shared-memory creation failures as a duplicate instance,
+          // including ENOSPC. Preserve the actual output without asserting a port conflict.
+          this.emit('trace', 'engine.startupRejected', { reason: 'single-instance', line })
+          this.fail(
+            'Deskflow 单实例资源初始化失败：可能已有引擎运行，或系统共享内存资源不足。请导出诊断日志以确认原因。',
+          )
+          continue
+        }
+        if (/cannot listen for clients/i.test(line)) {
+          this.emit('trace', 'engine.startupRejected', { reason: 'listen', line })
           this.fail(
             '已有 Deskflow 引擎或程序占用了键鼠端口。请退出独立 Deskflow 及后台服务后重试，Deskflow DDC 未接管该进程。',
           )
@@ -233,6 +243,7 @@ export class DeskflowEngine extends EventEmitter {
       clearTimeout(this.watchdog)
       this.ipc?.destroy()
       this.ipc = undefined
+      this.ipcReady = false
       if (this.child === child) this.child = undefined
       this.emit('state', this.failed ? 'error' : this.stopping ? 'stopped' : 'error')
       if (!this.stopping && !this.failed)
@@ -274,6 +285,7 @@ export class DeskflowEngine extends EventEmitter {
     const child = this.child
     const socket = connect(path)
     this.ipc = socket
+    this.ipcReady = false
     let buffer = ''
     let helloDone = false
     socket.setEncoding('utf8')
@@ -296,6 +308,7 @@ export class DeskflowEngine extends EventEmitter {
           return
         }
         if (line.startsWith('hello=') || line.startsWith('connectionState=')) observe(line)
+        if (line.startsWith('hello=')) this.ipcReady = true
         if (/^(versionMismatch|hello|connectionState|peerFingerprint)=/.test(line))
           this.emit('trace', 'engine.ipc', { line })
         if (this.failed || this.stopping) return
@@ -320,7 +333,10 @@ export class DeskflowEngine extends EventEmitter {
       /* bounded retry below */
     })
     socket.once('close', () => {
-      if (this.ipc === socket) this.ipc = undefined
+      if (this.ipc === socket) {
+        this.ipc = undefined
+        this.ipcReady = false
+      }
       if (!this.stopping && !this.failed && this.child === child)
         this.retry = setTimeout(() => this.connectIpc(attempt + 1, path, observe), 250)
     })
@@ -329,8 +345,16 @@ export class DeskflowEngine extends EventEmitter {
     if (this.stopTask) return this.stopTask
     const child = this.child
     if (!child) return Promise.resolve()
-    this.ipc?.destroy()
-    const task = stopOwnedProcess(child).finally(() => {
+    const socket = this.ipc
+    const requestStop =
+      this.ipcReady && socket && !socket.destroyed
+        ? () => {
+            socket.write('stop\n')
+            this.emit('trace', 'engine.stopRequested', { pid: child.pid, via: 'ipc' })
+          }
+        : undefined
+    const task = stopOwnedProcess(child, 1500, 1500, requestStop).finally(() => {
+      socket?.destroy()
       if (this.stopTask === task) this.stopTask = undefined
     })
     this.stopTask = task

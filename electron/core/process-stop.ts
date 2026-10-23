@@ -5,6 +5,7 @@ export function stopOwnedProcess(
   child: ChildProcess,
   grace = 1500,
   forceGrace = 1500,
+  requestGracefulStop?: () => void,
 ): Promise<void> {
   if (child.exitCode != null || child.signalCode != null) return Promise.resolve()
   return new Promise((resolve, reject) => {
@@ -21,7 +22,7 @@ export function stopOwnedProcess(
     }
     child.once('exit', ended)
     child.once('close', ended)
-    escalation = setTimeout(() => {
+    const forceStop = () => {
       deadline = setTimeout(() => {
         cleanup()
         reject(new Error('键鼠引擎仍未退出，已阻止重复启动；请导出日志并检查后台进程'))
@@ -32,12 +33,24 @@ export function stopOwnedProcess(
         cleanup()
         reject(error)
       }
-    }, grace)
-    try {
-      child.kill('SIGTERM')
-    } catch (error) {
-      cleanup()
-      reject(error)
     }
+    const terminate = () => {
+      escalation = setTimeout(forceStop, grace)
+      try {
+        child.kill('SIGTERM')
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }
+    if (requestGracefulStop) {
+      escalation = setTimeout(terminate, grace)
+      try {
+        requestGracefulStop()
+      } catch {
+        clearTimeout(escalation)
+        terminate()
+      }
+    } else terminate()
   })
 }

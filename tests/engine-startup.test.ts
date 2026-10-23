@@ -4,19 +4,20 @@ import { DeskflowEngine } from '../electron/core/engine'
 import { defaults } from '../electron/core/config'
 import type { Peer } from '../src/shared/types'
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), connect: vi.fn(), cleanup: vi.fn() }))
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), connect: vi.fn(), preflight: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
 vi.mock('node:net', () => ({ connect: mocks.connect }))
 vi.mock('../electron/core/engine-launch', () => ({
+  engineDirectory: () => '/private/test/owned',
   engineLaunch: async () => ({
     env: { TMPDIR: '/private/test/owned/' },
     directory: '/private/test/owned',
     ipcPath: '/private/test/owned/deskflow-core',
-    cleanup: mocks.cleanup,
   }),
 }))
 vi.mock('../electron/core/engine-preflight', () => ({
-  assertNoRunningEngine: async () => {},
+  deskflowIpcPath: (directory: string) => directory + '/deskflow-core',
+  assertNoRunningEngine: mocks.preflight,
   assertPortAvailable: async () => {},
 }))
 afterEach(() => {
@@ -40,7 +41,6 @@ async function start() {
   })
   mocks.spawn.mockReturnValue(child)
   mocks.connect.mockReturnValue(socket)
-  mocks.cleanup.mockResolvedValue(undefined)
   const engine = new DeskflowEngine('/test')
   vi.spyOn(engine, 'prepare').mockResolvedValue({
     binary: '/deskflow-core',
@@ -61,6 +61,61 @@ async function start() {
   return { engine, child, socket, states, messages, traces }
 }
 describe('engine startup stall handling', () => {
+  it('checks both the default and stable owned IPC namespaces before spawning', async () => {
+    const { engine, child } = await start()
+    expect(mocks.preflight.mock.calls).toEqual([[], ['/private/test/owned/deskflow-core']])
+    child.emit('exit', 0)
+    child.emit('close')
+    mocks.preflight.mockResolvedValueOnce(undefined)
+    mocks.preflight.mockRejectedValueOnce(new Error('owned engine still running'))
+    await expect(engine.start(defaults('test'), 'a', { id: 'b' } as Peer, '')).rejects.toThrow(
+      'owned engine still running',
+    )
+    expect(mocks.spawn).toHaveBeenCalledOnce()
+  })
+  it('requests graceful stop only after an owned IPC hello and awaits actual exit', async () => {
+    const { engine, child, socket, traces } = await start()
+    socket.emit('data', 'hello=1.27.0\n')
+    let ended = false
+    const stopped = engine.stop().then(() => {
+      ended = true
+    })
+    expect(socket.write).toHaveBeenCalledWith('stop\n')
+    expect(socket.destroy).not.toHaveBeenCalled()
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(traces).toContain('engine.stopRequested')
+    expect(ended).toBe(false)
+    child.emit('exit', 0)
+    child.emit('close')
+    await stopped
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(socket.destroy).toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not send stop on a socket whose handshake is incomplete', async () => {
+    const { engine, child, socket } = await start()
+    socket.emit('connect')
+    socket.emit('data', 'versionMismatch=1.27.0\n')
+    const stopped = engine.stop()
+    expect(socket.write).not.toHaveBeenCalledWith('stop\n')
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    child.emit('exit', 0)
+    child.emit('close')
+    await stopped
+  })
+  it.each([
+    ['an instance of deskflow core is already running', '单实例资源初始化失败'],
+    ['cannot listen for clients', '占用了键鼠端口'],
+  ])('preserves the startup rejection reason: %s', async (line, expected) => {
+    const { child, messages, traces } = await start()
+    child.stderr.emit('data', Buffer.from(line + '\n'))
+    expect(messages.at(-1)).toContain(expected)
+    if (expected === '单实例资源初始化失败') expect(messages.at(-1)).not.toContain('端口')
+    expect(traces).toContain('engine.startupRejected')
+    child.emit('exit', 1)
+    child.emit('close')
+    await Promise.resolve()
+  })
   it('cleans IPC and startup timers when spawning fails before an exit event', async () => {
     const { engine, child, socket, states, messages } = await start()
     child.emit('error', new Error('spawn ENOENT'))
@@ -70,7 +125,6 @@ describe('engine startup stall handling', () => {
     expect(states.at(-1)).toBe('error')
     expect(messages.join(' ')).toContain('ENOENT')
     expect(socket.destroy).toHaveBeenCalled()
-    expect(mocks.cleanup).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
     await expect(engine.assertAvailable(defaults('test'))).resolves.toBeUndefined()
   })
@@ -108,10 +162,8 @@ describe('engine startup stall handling', () => {
     expect(child.kill).toHaveBeenCalledOnce()
     expect(messages.at(-1)).toContain('尚未建立本机 IPC')
     expect(traces).toContain('engine.startupTimeout')
-    expect(mocks.cleanup).not.toHaveBeenCalled()
     child.emit('close')
     await Promise.resolve()
-    expect(mocks.cleanup).toHaveBeenCalledOnce()
   })
   it('keeps a listening host alive and reports a different stage from startup failure', async () => {
     const { child, socket, states, messages } = await start()

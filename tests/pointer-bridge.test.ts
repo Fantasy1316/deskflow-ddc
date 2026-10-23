@@ -78,6 +78,42 @@ afterEach(() => {
   desktop.events.clear()
 })
 describe('platform-neutral independent display cursor bridge', () => {
+  it.each(['darwin', 'win32'])(
+    'moves away from the visible shared panel outer edge after a blocked crossing on %s',
+    async (platform) => {
+      vi.useFakeTimers()
+      const { runtime, bridge } = setup('host', platform)
+      runtime.state.displayDeviceId = 'local'
+      desktop.displays.push({
+        id: 43,
+        label: 'Shared panel',
+        internal: false,
+        bounds: { x: 1512, y: 0, width: 1920, height: 1080 },
+      })
+      desktop.cursor = { x: 3431, y: 700 }
+      desktop.scale = platform === 'win32' ? 2 : 1
+      const restored = bridge.recoverDesktop()
+      await vi.advanceTimersByTimeAsync(80)
+      await restored
+      expect(runtime.display.landOnScreen).toHaveBeenCalledWith({
+        x: 3408 * desktop.scale,
+        y: 700 * desktop.scale,
+      })
+      expect(runtime.switchKeyboardToPeer).not.toHaveBeenCalled()
+      disconnect(runtime)
+    },
+  )
+  it('cancels outer edge recovery when the shared display changes source', async () => {
+    vi.useFakeTimers()
+    const { runtime, bridge } = setup()
+    runtime.state.displayDeviceId = 'local'
+    const restored = bridge.recoverDesktop()
+    runtime.state.displayDeviceId = 'peer'
+    await vi.advanceTimersByTimeAsync(80)
+    await restored
+    expect(runtime.display.landOnScreen).not.toHaveBeenCalled()
+    disconnect(runtime)
+  })
   it('backs off after hotkey failure without recursive registration, then recovers', async () => {
     vi.useFakeTimers()
     desktop.register.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)

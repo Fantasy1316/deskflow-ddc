@@ -4,6 +4,39 @@ import { EventEmitter, once } from 'node:events'
 import { stopOwnedProcess } from '../electron/core/process-stop'
 afterEach(() => vi.useRealTimers())
 describe('owned process termination', () => {
+  it('lets an IPC stop exit cleanly without sending signals', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn() })
+    const requestStop = vi.fn(() => child.emit('exit', 0))
+    await stopOwnedProcess(child as unknown as ChildProcess, 50, 50, requestStop)
+    expect(requestStop).toHaveBeenCalledOnce()
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('falls back to TERM then KILL when an IPC stop is ignored', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn() })
+    const result = stopOwnedProcess(child as unknown as ChildProcess, 50, 50, vi.fn())
+    expect(child.kill).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(50)
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']])
+    await vi.advanceTimersByTimeAsync(50)
+    expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']])
+    child.emit('exit', null, 'SIGKILL')
+    await result
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('falls back immediately if the graceful stop transport throws', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn() })
+    const result = stopOwnedProcess(child as unknown as ChildProcess, 50, 50, () => {
+      throw new Error('closed IPC')
+    })
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']])
+    child.emit('exit')
+    await result
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it.skipIf(process.platform === 'win32')(
     'force-kills a real child that ignores SIGTERM and awaits its exit',
     async () => {
