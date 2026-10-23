@@ -1,0 +1,115 @@
+import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
+import type { Action, Snapshot } from '../shared/types'
+import { initializeBridge } from './bridge-state'
+
+function previewSnapshot(): Snapshot {
+  return {
+    cursorDisplays: [],
+    sessionLayout: null,
+    config: {
+      deviceName: '我的电脑',
+      role: 'host',
+      peerAddress: '',
+      controlPort: 49728,
+      deskflowPort: 24800,
+      deskflowPath: '',
+      displayId: '',
+      localInput: null,
+      peerInput: null,
+      shortcut: 'control+alt+F12',
+      clipboard: true,
+      clipboardMegabytes: 4,
+      layoutSide: 'off',
+      crossScreenVideo: 'follow',
+      retainedDisplayId: '',
+    },
+    deviceId: 'preview',
+    platform: 'preview',
+    addresses: [],
+    monitors: [],
+    running: false,
+    listening: false,
+    connected: false,
+    engine: 'stopped',
+    peer: null,
+    activeDeviceId: null,
+    displayDeviceId: null,
+    switching: false,
+    pairingCode: '',
+    dependencies: { deskflow: false, displayControl: false, accessibility: false },
+    logs: [],
+    lastError: null,
+    preview: true,
+    diagnostics: { directory: '', error: null },
+  }
+}
+export function useBridge() {
+  const state = shallowRef<Snapshot>(previewSnapshot())
+  const loading = shallowRef(true),
+    busy = shallowRef(false),
+    notice = shallowRef(''),
+    noticeError = shallowRef(false)
+  let unsubscribe: (() => void) | undefined, timer: ReturnType<typeof setTimeout> | undefined
+  function notify(message: string, error = false) {
+    clearTimeout(timer)
+    notice.value = message
+    noticeError.value = error
+    timer = setTimeout(() => {
+      notice.value = ''
+    }, 7000)
+  }
+  async function act(action: Action) {
+    if (busy.value) return false
+    busy.value = true
+    try {
+      if (!window.screenbridge) {
+        if (action.type === 'save') {
+          state.value = { ...state.value, config: structuredClone(action.config) }
+          notify('已更新预览配置。硬件功能请在桌面 App 中使用。')
+        } else notify('当前为浏览器预览，请打开桌面 App 执行此操作。', true)
+      } else {
+        await window.screenbridge.act(action)
+        if (action.type === 'save') notify('设置已保存')
+        if (action.type === 'copyPairing') notify('配对码已复制')
+      }
+      return true
+    } catch (error) {
+      notify(
+        String(error instanceof Error ? error.message : error).replace(
+          /^Error invoking remote method '[^']+': Error: /,
+          '',
+        ),
+        true,
+      )
+      return false
+    } finally {
+      busy.value = false
+    }
+  }
+  const displayConfigured = computed(
+    () =>
+      !!state.value.config.displayId &&
+      state.value.config.localInput !== null &&
+      state.value.config.peerInput !== null,
+  )
+  onMounted(async () => {
+    try {
+      if (window.screenbridge) {
+        const connection = initializeBridge(window.screenbridge, (value) => {
+          state.value = value
+        })
+        unsubscribe = connection.dispose
+        await connection.ready
+      }
+    } catch (error) {
+      notify(String(error), true)
+    } finally {
+      loading.value = false
+    }
+  })
+  onUnmounted(() => {
+    unsubscribe?.()
+    clearTimeout(timer)
+  })
+  return { state, loading, busy, notice, noticeError, displayConfigured, act }
+}

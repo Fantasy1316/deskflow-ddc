@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.native-cache/
+.workbuddy/
+resources/
+native/
+pnpm-lock.yaml
+THIRD_PARTY_NOTICES.md

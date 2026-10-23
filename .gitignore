@@ -1,0 +1,21 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.native-cache/
+.DS_Store
+.workbuddy/
+
+# Generated native binaries
+resources/bin/
+
+# Local settings and diagnostic exports
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+*.jsonl
+settings.json
+settings.json.*.tmp
