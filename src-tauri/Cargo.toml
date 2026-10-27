@@ -1,8 +1,8 @@
 [package]
 name = "deskflow-ddc-tauri"
-version = "0.2.0-alpha.1"
+version = "0.2.0"
 edition = "2021"
-default-run = "deskflow-ddc-preview"
+default-run = "deskflow-ddc"
 rust-version = "1.90"
 license = "MIT"
 
@@ -56,7 +56,7 @@ tauri-plugin-single-instance = { version = "2", optional = true }
 tempfile = "3"
 
 [[bin]]
-name = "deskflow-ddc-preview"
+name = "deskflow-ddc"
 path = "src/main.rs"
 required-features = ["desktop"]
 

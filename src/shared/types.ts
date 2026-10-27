@@ -15,7 +15,7 @@ export interface Config {
   clipboard: boolean
   clipboardMegabytes: number
   layoutSide: 'off' | ScreenSide
-  crossScreenVideo: 'follow' | 'keep'
+  crossScreenVideo: 'manual' | 'follow' | 'keep'
   retainedDisplayId: string
 }
 export interface CursorDisplay {

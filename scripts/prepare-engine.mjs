@@ -22,7 +22,7 @@ function argument(name, fallback) {
 const platform = argument('--platform', process.platform)
 const arch = argument('--arch', process.arch)
 if (!((platform === 'darwin' && arch === 'arm64') || (platform === 'win32' && arch === 'x64'))) {
-  throw new Error('Preview currently packages Apple Silicon macOS and Windows x64.')
+  throw new Error('Deskflow DDC currently packages Apple Silicon macOS and Windows x64.')
 }
 const cache = resolve(argument('--cache', join(root, '.engine-cache')))
 const destination = resolve(argument('--dest', join(root, 'src-tauri/resources')))

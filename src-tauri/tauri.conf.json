@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Deskflow DDC Preview",
-  "version": "0.2.0-alpha.1",
+  "productName": "Deskflow DDC",
+  "version": "0.2.0",
   "identifier": "app.deskflow-ddc.preview",
   "build": {
     "beforeDevCommand": "pnpm dev:web",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Deskflow DDC Preview",
+        "title": "Deskflow DDC",
         "width": 1120,
         "height": 800,
         "minWidth": 860,
@@ -41,5 +41,5 @@
       "infoPlist": "Info.plist"
     }
   },
-  "mainBinaryName": "deskflow-ddc-preview"
+  "mainBinaryName": "deskflow-ddc"
 }

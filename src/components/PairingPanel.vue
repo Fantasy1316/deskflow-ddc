@@ -88,7 +88,7 @@ const valid = computed(
       </div>
     </form>
     <div class="inline-info">
-      Preview 的身份和配置独立于旧版。可导入旧版设备设置，之后需要重新配对。
+      0.2 的身份和配置独立于 0.1。可导入旧版设备设置，之后需要重新配对。
       <button
         class="text-button"
         :disabled="locked"
@@ -180,7 +180,7 @@ const valid = computed(
               placeholder="粘贴 SB1- 开头的完整配对码"
           /></label>
         </div>
-        <label class="field"
+        <label class="field fallback-address"
           ><span>备用 IP（可选，用逗号分隔，最多 8 个）</span
           ><input
             v-model="fallbackText"
@@ -246,3 +246,9 @@ const valid = computed(
     </div>
   </section>
 </template>
+
+<style scoped>
+.fallback-address {
+  margin-top: 20px;
+}
+</style>

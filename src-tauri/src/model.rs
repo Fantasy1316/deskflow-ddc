@@ -43,7 +43,7 @@ impl Default for Config {
             role: "host".into(),
             peer_address: String::new(),
             fallback_ips: vec![],
-            // Preview can coexist with the installed stable application.
+            // Keep the 0.2 ports separate from the 0.1 application.
             control_port: 49729,
             deskflow_port: 24801,
             deskflow_path: String::new(),
@@ -54,7 +54,7 @@ impl Default for Config {
             clipboard: true,
             clipboard_megabytes: 4,
             layout_side: "off".into(),
-            cross_screen_video: "follow".into(),
+            cross_screen_video: "manual".into(),
             retained_display_id: String::new(),
         }
     }
@@ -105,7 +105,7 @@ impl Config {
             "布局无效"
         );
         ensure!(
-            ["keep", "follow"].contains(&self.cross_screen_video.as_str()),
+            ["manual", "keep", "follow"].contains(&self.cross_screen_video.as_str()),
             "画面模式无效"
         );
         ensure!(

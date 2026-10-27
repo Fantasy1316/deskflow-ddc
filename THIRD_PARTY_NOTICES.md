@@ -16,4 +16,4 @@ Tauri 2, its plugins, Tokio, serde, mdns-sd, keyring, rcgen and cryptographic cr
 
 ## JavaScript dependencies
 
-Vue, Vite, TypeScript, zod and the Lucide icon package retain their upstream licenses. `pnpm-lock.yaml` records exact dependency versions. The Tauri application ships compiled frontend assets and uses the system WebView; it does not ship an Electron/Chromium runtime. Electron and selfsigned are retained only for legacy regression tests on this migration branch. Original application code is licensed under the MIT license; see `LICENSE`. Third-party licenses are not replaced by the project license.
+Vue, @tauri-apps/api, Vite, TypeScript, zod and the Lucide icon package retain their upstream licenses. `pnpm-lock.yaml` records exact dependency versions. The Tauri application ships compiled frontend assets and uses the system WebView; it does not ship an Electron/Chromium runtime. Original application code is licensed under the MIT license; see `LICENSE`. Third-party licenses are not replaced by the project license.

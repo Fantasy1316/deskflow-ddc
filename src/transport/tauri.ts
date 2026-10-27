@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { BridgeAPI, Snapshot } from '../shared/types'
+import { actionSchema } from '../shared/actions'
 
 /** Register the native event listener before any bootstrap snapshot is requested. */
 export async function installTauriBridge(): Promise<void> {
@@ -14,7 +15,7 @@ export async function installTauriBridge(): Promise<void> {
   })
   const bridge: BridgeAPI = {
     snapshot: () => invoke<Snapshot>('snapshot'),
-    act: (action) => invoke('act', { action }),
+    act: (action) => invoke('act', { action: actionSchema.parse(action) }),
     reportError: (error) => invoke('report_error', { error }),
     subscribe: (listener) => {
       listeners.add(listener)

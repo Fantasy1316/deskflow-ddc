@@ -25,7 +25,3 @@ export const actionSchema = z.discriminatedUnion('type', [
   ).map((type) => z.object({ type: z.literal(type) }).strict()),
 ])
 export type Action = z.infer<typeof actionSchema>
-
-export function unreachableAction(action: never): never {
-  throw new Error('不支持的应用操作')
-}

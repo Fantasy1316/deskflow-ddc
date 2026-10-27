@@ -85,6 +85,10 @@ impl Runtime {
             };
             let effect = crate::switching::decide(crate::switching::Policy {
                 explicit: self.command_pending.load(Ordering::Acquire),
+                manual: s
+                    .session_layout
+                    .as_ref()
+                    .is_some_and(|l| l.video == "manual"),
                 keep: keep_mode(&s),
                 target_retained: retained,
                 provider_retained: pointer::selected(
@@ -144,7 +148,11 @@ impl Runtime {
         } else {
             self.log(
                 "success",
-                if keep_mode(&s) {
+                if keep_mode(&s)
+                    || s.session_layout
+                        .as_ref()
+                        .is_some_and(|l| l.video == "manual")
+                {
                     "键鼠已切换"
                 } else {
                     "显示器输入指令已发送，请以实际画面为准"
@@ -196,6 +204,22 @@ impl Runtime {
         );
         if s.active_device_id.as_ref() == Some(&target) {
             return Ok(());
+        }
+        if !self.command_pending.load(Ordering::Acquire)
+            && s.session_layout
+                .as_ref()
+                .is_some_and(|l| l.video == "manual")
+        {
+            let retained = if target == s.device_id {
+                pointer::selected(&s.cursor_displays, &s.config.retained_display_id).is_some()
+            } else {
+                s.peer.as_ref().is_some_and(|p| p.retained_display)
+            };
+            ensure!(
+                s.display_status != "uncertain"
+                    && (s.display_device_id.as_ref() == Some(&target) || retained),
+                "目标没有可见屏幕，请使用快捷键或按钮切换画面"
+            );
         }
         ensure!(
             self.keyboard_pending

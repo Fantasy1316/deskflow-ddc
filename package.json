@@ -1,14 +1,13 @@
 {
   "name": "deskflow-ddc",
-  "version": "0.2.0-alpha.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
   "type": "module",
-  "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "tauri dev",
     "dev:web": "vite --host 127.0.0.1",
-    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build": "pnpm build:web",
     "test": "vitest run",
     "build:native": "node scripts/build-native.mjs",
@@ -17,26 +16,21 @@
     "test:native": "node scripts/test-native.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "dev:electron": "node scripts/dev.mjs",
     "tauri": "tauri",
     "build:tauri": "tauri build --no-binary-patching",
     "build:web": "vue-tsc --noEmit && vite build",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
-    "prepare:engine": "node scripts/prepare-engine.mjs",
-    "build:electron": "pnpm typecheck && vite build && tsc -p tsconfig.electron.json"
+    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
+    "prepare:engine": "node scripts/prepare-engine.mjs"
   },
   "dependencies": {
     "vue": "^3.5.21",
     "lucide-vue-next": "^0.468.0",
-    "selfsigned": "^3.0.1",
     "zod": "^3.25.0",
     "@tauri-apps/api": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
     "@vitejs/plugin-vue": "^6.0.1",
-    "electron": "^38.0.0",
-    "electron-builder": "^26.0.12",
     "typescript": "^5.9.2",
     "vite": "^7.1.5",
     "vitest": "^3.2.4",
@@ -44,62 +38,10 @@
     "prettier": "3.6.2",
     "@tauri-apps/cli": "^2.0.0"
   },
-  "build": {
-    "appId": "app.deskflow-ddc.desktop",
-    "productName": "Deskflow DDC",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "dist-electron/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources",
-        "to": "native",
-        "filter": [
-          "**/*",
-          "!vendor/**/*",
-          "!monitor.ps1"
-        ]
-      },
-      {
-        "from": "native/windows/monitor.ps1",
-        "to": "native/monitor.ps1"
-      },
-      {
-        "from": "LICENSE",
-        "to": "LICENSE"
-      },
-      {
-        "from": "THIRD_PARTY_NOTICES.md",
-        "to": "THIRD_PARTY_NOTICES.md"
-      },
-      {
-        "from": "resources/JS-NOTICES.txt",
-        "to": "JS-NOTICES.txt"
-      }
-    ],
-    "mac": {
-      "category": "public.app-category.utilities",
-      "target": [
-        "dir"
-      ],
-      "identity": null,
-      "extendInfo": {
-        "NSLocalNetworkUsageDescription": "连接您配对的另一台电脑，协调显示器和键鼠切换。"
-      },
-      "icon": "resources/icons/app.icns"
-    },
-    "win": {
-      "target": [
-        "portable"
-      ],
-      "signAndEditExecutable": true,
-      "icon": "resources/icons/app.ico"
-    }
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=11 <12"
   },
-  "license": "MIT"
+  "packageManager": "pnpm@11.8.0"
 }

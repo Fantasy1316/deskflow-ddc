@@ -46,7 +46,7 @@ export const configSchema = z.preprocess(
       clipboard: z.boolean(),
       clipboardMegabytes: z.number().int().min(1).max(32),
       layoutSide: z.enum(['off', 'left', 'right', 'top', 'bottom']).default('off'),
-      crossScreenVideo: z.enum(['follow', 'keep']).default('follow'),
+      crossScreenVideo: z.enum(['manual', 'follow', 'keep']).default('manual'),
       retainedDisplayId: z
         .string()
         .max(128)
@@ -61,3 +61,25 @@ export const configSchema = z.preprocess(
         ctx.addIssue({ code: 'custom', message: '两台电脑的输入源数值必须不同' })
     }),
 )
+
+/** Frontend-only initial state; the desktop backend supplies persisted settings. */
+export function defaultConfig(deviceName: string): Config {
+  return {
+    deviceName,
+    role: 'host',
+    peerAddress: '',
+    fallbackIps: [],
+    controlPort: 49729,
+    deskflowPort: 24801,
+    deskflowPath: '',
+    displayId: '',
+    localInput: null,
+    peerInput: null,
+    shortcut: 'control+alt+F10',
+    clipboard: true,
+    clipboardMegabytes: 4,
+    layoutSide: 'off',
+    crossScreenVideo: 'manual',
+    retainedDisplayId: '',
+  }
+}

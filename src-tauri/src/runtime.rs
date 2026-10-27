@@ -150,7 +150,7 @@ impl Runtime {
         let existed = directory.join("settings.json").exists();
         ensure!(
             !existed || directory.join("identity.pem").exists(),
-            "引擎身份文件缺失，未生成新身份；请恢复 Preview 的配置备份"
+            "引擎身份文件缺失，未生成新身份；请恢复 应用配置备份"
         );
         let store = Store::load(directory.clone())?;
         let fingerprint = engine::identity(&directory)?;
@@ -229,7 +229,7 @@ impl Runtime {
         runtime
             .log(
                 "info",
-                "Preview 使用独立配置与身份；旧版可以保留，测试共享前请先停止旧版共享。",
+                "0.2 使用独立配置与身份；开始共享前请先停止旧版或独立 Deskflow 的共享。",
             )
             .await;
         let this = runtime.clone();
@@ -392,7 +392,7 @@ impl Runtime {
         self.refresh().await?;
         self.log(
             "info",
-            "已导入旧版配置；Preview 使用独立身份，请重新配对。旧版文件未修改。",
+            "已导入旧版配置；0.2 使用独立身份，请重新配对。旧版文件未修改。",
         )
         .await;
         Ok(())
@@ -449,7 +449,7 @@ impl Runtime {
         );
         ensure!(
             state.dependencies.accessibility,
-            "请先在系统设置中授予 Preview 辅助功能权限，再点击检测"
+            "请先在系统设置中授予 Deskflow DDC 辅助功能权限，再点击检测"
         );
         ensure!(
             c.retained_display_id.is_empty()
@@ -610,7 +610,11 @@ impl Runtime {
     }
     pub async fn shortcut(&self) -> Option<String> {
         let s = self.snapshot().await;
-        if !keep_mode(&s)
+        let manual = s
+            .session_layout
+            .as_ref()
+            .is_some_and(|l| l.video == "manual");
+        if !(manual || keep_mode(&s))
             || !s.connected
             || s.engine != "ready"
             || s.active_device_id.as_ref() != Some(&s.device_id)
@@ -644,7 +648,7 @@ fn keep_mode(s: &Snapshot) -> bool {
     s.connected
         && s.session_layout
             .as_ref()
-            .is_some_and(|l| l.host_side != "off" && l.video == "keep")
+            .is_some_and(|l| l.host_side != "off" && l.video != "follow")
 }
 fn local_side(s: &Snapshot) -> &str {
     let side = s
@@ -685,13 +689,15 @@ pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Ident
         (
             platform(),
             c.shortcut.as_str(),
-            c.layout_side != "off" && c.cross_screen_video == "keep",
+            c.cross_screen_video == "manual"
+                || c.layout_side != "off" && c.cross_screen_video == "keep",
         )
     } else {
         (
             peer.platform.as_str(),
             peer.shortcut.as_str(),
-            peer.layout_side != "off" && peer.cross_screen_video == "keep",
+            peer.cross_screen_video == "manual"
+                || peer.layout_side != "off" && peer.cross_screen_video == "keep",
         )
     };
     ensure!(
@@ -763,5 +769,18 @@ mod tests {
     fn parses_only_engine_screen_names() {
         assert!(parse_transition("switch from \"sb-11111111-1111-1111-1111-111111111111\" to \"sb-22222222-2222-2222-2222-222222222222\" at 5,40").is_some());
         assert!(parse_transition("switch from foo to bar").is_none());
+    }
+    #[test]
+    fn manual_video_shortcut_checks_windows_receiver_even_with_edges_disabled() {
+        let p = peer();
+        let mut c = Config {
+            local_input: Some(17),
+            peer_input: Some(1),
+            shortcut: "control+alt+F12".into(),
+            ..Config::default()
+        };
+        assert!(validate_peer(&c, uuid::Uuid::new_v4(), None, &p).is_err());
+        c.shortcut = "control+alt+F10".into();
+        assert!(validate_peer(&c, uuid::Uuid::new_v4(), None, &p).is_ok());
     }
 }

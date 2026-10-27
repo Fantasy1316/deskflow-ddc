@@ -14,7 +14,7 @@ const displayedSide = computed({
   },
 })
 const displayedVideo = computed({
-  get: () => (props.isHost ? video.value : (props.state.sessionLayout?.video ?? 'follow')),
+  get: () => (props.isHost ? video.value : (props.state.sessionLayout?.video ?? 'manual')),
   set: (value) => {
     if (props.isHost) video.value = value
   },
@@ -67,9 +67,10 @@ const retainedAvailable = computed(
     >
     <label class="field"
       ><span>鼠标跨屏时，共用显示器如何切换</span
-      ><select v-model="displayedVideo" :disabled="locked || !isHost || displayedSide === 'off'">
-        <option value="follow">跟随键鼠切换画面（只有一块共用屏时使用）</option>
-        <option value="keep">目标有独立屏幕时仅转移键鼠，否则切换画面</option>
+      ><select v-model="displayedVideo" :disabled="locked || !isHost">
+        <option value="manual">画面仅手动切换，边缘只转移键鼠（推荐）</option>
+        <option value="follow">允许边缘跟随键鼠切换画面</option>
+        <option value="keep">目标有独立屏幕时仅转移键鼠，否则允许边缘切换画面</option>
       </select></label
     >
     <label class="field"
@@ -87,7 +88,11 @@ const retainedAvailable = computed(
       每台电脑分别选择自己的独立屏幕。只有共用显示器时请选择“没有独立屏幕”；请勿将共用显示器选作独立屏幕。
     </p>
     <div v-if="displayedSide !== 'off'" class="inline-info">
-      保存并重新开始共享后生效。两台电脑都只有共用屏幕时，边缘跨屏会同时切换画面。按钮和切换快捷键始终切换共用屏幕画面。
+      <template v-if="displayedVideo === 'manual'">
+        边缘不会切换显示器输入源。目标有独立屏幕或正在显示共用屏幕时，才允许转移键鼠；否则请使用按钮或快捷键切换画面。
+      </template>
+      <template v-else> 当前允许边缘触发画面切换，碰到指定边缘可能切换显示器输入源。 </template>
+      保存并重新开始共享后生效。按钮和切换快捷键始终用于切换共用屏幕画面。
     </div>
   </div>
 </template>

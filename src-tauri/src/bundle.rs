@@ -1,4 +1,4 @@
-//! Install a verified bundled runtime once into the Preview's private data tree.
+//! Install a verified bundled runtime once into the application's private data tree.
 //! An archive avoids duplicate Qt frameworks when packagers dereference symlinks.
 use anyhow::{ensure, Context, Result};
 use flate2::read::GzDecoder;

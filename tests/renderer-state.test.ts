@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick, shallowRef } from 'vue'
 import { useConfigDraft } from '../src/composables/useConfigDraft'
 import { initializeBridge } from '../src/composables/bridge-state'
-import { defaults } from '../electron/core/config'
+import { defaultConfig } from '../src/shared/config'
 import type { Snapshot } from '../src/shared/types'
 
 describe('renderer state races', () => {
   it('merges unrelated config updates without replacing edited fields, then accepts a save', async () => {
-    const source = shallowRef(defaults('original')),
+    const source = shallowRef(defaultConfig('original')),
       scope = effectScope()
     const editor = scope.run(() => useConfigDraft(() => source.value))!
     try {

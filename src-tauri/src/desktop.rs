@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     Emitter, Manager,
 };
@@ -218,9 +218,76 @@ async fn report_error(
 }
 fn show(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+#[derive(Clone)]
+struct TrayControls {
+    local: MenuItem<tauri::Wry>,
+    peer: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+    busy: Arc<AtomicBool>,
+}
+impl TrayControls {
+    fn sync(&self, state: &Snapshot) {
+        let idle = !self.busy.load(Ordering::Acquire);
+        let can_switch = idle
+            && state.running
+            && state.connected
+            && state.engine == "ready"
+            && !state.switching
+            && state.display_status != "uncertain";
+        let _ = self.local.set_enabled(can_switch);
+        let _ = self.peer.set_enabled(can_switch);
+        let _ = self.stop.set_enabled(idle && state.running);
+    }
+}
+fn tray_action(id: &str) -> Option<Action> {
+    match id {
+        "switch-local" => Some(Action::Switch {
+            target: "local".into(),
+        }),
+        "switch-peer" => Some(Action::Switch {
+            target: "peer".into(),
+        }),
+        "stop" => Some(Action::Stop {}),
+        _ => None,
+    }
+}
+fn handle_menu(app: &tauri::AppHandle, id: &str) {
+    match id {
+        "show" => show(app),
+        "quit" => quit(app),
+        _ => {
+            let Some(action) = tray_action(id) else {
+                return;
+            };
+            let controls = app.state::<TrayControls>().inner().clone();
+            if app.state::<AtomicBool>().load(Ordering::Acquire)
+                || controls.busy.swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let runtime = app.state::<Arc<Runtime>>();
+                controls.sync(&runtime.snapshot().await);
+                let _action = runtime.actions.lock().await;
+                // A quit may have started while this action was queued.
+                if !app.state::<AtomicBool>().load(Ordering::Acquire) {
+                    if let Err(e) = dispatch(&app, &runtime, action).await {
+                        runtime.log("error", &format!("托盘操作失败：{e}")).await;
+                        show(&app);
+                    }
+                }
+                controls.busy.store(false, Ordering::Release);
+                controls.sync(&runtime.snapshot().await);
+            });
+        }
     }
 }
 fn quit(app: &tauri::AppHandle) {
@@ -324,22 +391,60 @@ pub fn run() {
             let runtime = match tauri::async_runtime::block_on(Runtime::new(app.path().app_data_dir()?, resource)) {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    app.dialog().message(format!("无法读取 Preview 配置或系统凭据：{error}\n旧版 Deskflow DDC 的数据未修改。"))
-                        .title("Deskflow DDC Preview 启动失败")
+                    app.dialog().message(format!("无法读取 应用配置或系统凭据：{error}\n旧版 Deskflow DDC 的数据未修改。"))
+                        .title("Deskflow DDC 启动失败")
                         .kind(tauri_plugin_dialog::MessageDialogKind::Error).blocking_show();
                     return Err(error.into());
                 }
             };
             app.manage(runtime.clone());
             app.manage(AtomicBool::new(false));
-            let show_item =
-                MenuItem::with_id(app, "show", "打开 Deskflow DDC Preview", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出 Preview", true, Some("CmdOrCtrl+Q"))?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let show_item = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
+            let controls = TrayControls {
+                local: MenuItem::with_id(app, "switch-local", "切换到本机", false, None::<&str>)?,
+                peer: MenuItem::with_id(app, "switch-peer", "切换到另一台", false, None::<&str>)?,
+                stop: MenuItem::with_id(app, "stop", "停止共享", false, None::<&str>)?,
+                busy: Arc::new(AtomicBool::new(false)),
+            };
+            controls.sync(&tauri::async_runtime::block_on(runtime.snapshot()));
+            app.manage(controls.clone());
+            let menu = Menu::with_items(app, &[
+                &show_item,
+                &PredefinedMenuItem::separator(app)?,
+                &controls.local,
+                &controls.peer,
+                &controls.stop,
+                &PredefinedMenuItem::separator(app)?,
+                &quit_item,
+            ])?;
             #[cfg(target_os = "macos")]
             {
-                let submenu=tauri::menu::Submenu::with_items(app,"Deskflow DDC Preview",true,&[&show_item,&quit_item])?;
-                app.set_menu(Menu::with_items(app,&[&submenu])?)?;
+                use tauri::menu::Submenu;
+                let submenu = Submenu::with_items(
+                    app,
+                    "Deskflow DDC",
+                    true,
+                    &[&show_item, &quit_item],
+                )?;
+                // WKWebView routes editing key equivalents through Cocoa's
+                // responder chain. Use native items rather than global shortcuts
+                // so they operate only on the focused editable control.
+                let edit = Submenu::with_items(
+                    app,
+                    "编辑",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, Some("撤销"))?,
+                        &PredefinedMenuItem::redo(app, Some("重做"))?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, Some("剪切"))?,
+                        &PredefinedMenuItem::copy(app, Some("复制"))?,
+                        &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+                        &PredefinedMenuItem::select_all(app, Some("全选"))?,
+                    ],
+                )?;
+                app.set_menu(Menu::with_items(app, &[&submenu, &edit])?)?;
             }
             #[cfg(target_os = "macos")]
             let icon = tauri::image::Image::from_bytes(include_bytes!(
@@ -348,31 +453,32 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let icon =
                 tauri::image::Image::from_bytes(include_bytes!("../../resources/icons/app.png"))?;
-            let tray = TrayIconBuilder::with_id("preview")
+            let tray = TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("Deskflow DDC Preview")
+                .tooltip("Deskflow DDC")
                 .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show(app),
-                    "quit" => quit(app),
-                    _ => {}
-                })
+                .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    if matches!(event, tauri::tray::TrayIconEvent::DoubleClick { .. }) {
+                    if matches!(
+                        event,
+                        tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
                         show(tray.app_handle());
                     }
                 })
                 .build(app);
             let has_tray = tray.is_ok();
             if let Err(e) = tray {
-                eprintln!("Preview tray unavailable: {e}");
+                eprintln!("Tray unavailable: {e}");
             }
-            app.on_menu_event(|app, event| match event.id.as_ref() {
-                "show" => show(app),
-                "quit" => quit(app),
-                _ => {}
-            });
+            // The global handler also receives tray events. Register only once
+            // so a click cannot dispatch the same switch or stop twice.
+            app.on_menu_event(|app, event| handle_menu(app, event.id.as_ref()));
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 let rt = runtime.clone();
@@ -381,7 +487,12 @@ pub fn run() {
                         api.prevent_close();
                         if has_tray && !handle.state::<AtomicBool>().load(Ordering::Acquire) {
                             if let Some(w) = handle.get_webview_window("main") {
-                                let _ = w.hide();
+                                if w.hide().is_ok() {
+                                    // Accessory keeps the tray and sharing alive while
+                                    // removing the hidden app from the Dock and Cmd+Tab.
+                                    #[cfg(target_os = "macos")]
+                                    let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                                }
                             }
                         } else {
                             quit(&handle);
@@ -401,6 +512,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while updates.changed().await.is_ok() {
                     let snapshot = updates.borrow_and_update().clone();
+                    controls.sync(&snapshot);
                     let _ = handle.emit_to("main", "bridge-state", snapshot);
                 }
             });
@@ -408,7 +520,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("无法启动 Deskflow DDC Preview");
+        .expect("无法启动 Deskflow DDC");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !app.state::<AtomicBool>().load(Ordering::Acquire) {
@@ -432,5 +544,17 @@ mod tests {
         assert!(
             serde_json::from_value::<Action>(json!({"type":"stop","unexpected":true})).is_err()
         );
+    }
+    #[test]
+    fn tray_commands_use_local_and_peer_targets() {
+        assert!(
+            matches!(tray_action("switch-local"), Some(Action::Switch { target }) if target == "local")
+        );
+        assert!(
+            matches!(tray_action("switch-peer"), Some(Action::Switch { target }) if target == "peer")
+        );
+        assert!(matches!(tray_action("stop"), Some(Action::Stop {})));
+        assert!(tray_action("show").is_none());
+        assert!(tray_action("unknown").is_none());
     }
 }

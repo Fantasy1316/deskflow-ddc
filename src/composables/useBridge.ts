@@ -1,28 +1,13 @@
 import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
 import type { Action, Snapshot } from '../shared/types'
+import { defaultConfig } from '../shared/config'
 import { initializeBridge } from './bridge-state'
 
 function previewSnapshot(): Snapshot {
   return {
     cursorDisplays: [],
     sessionLayout: null,
-    config: {
-      deviceName: '我的电脑',
-      role: 'host',
-      peerAddress: '',
-      controlPort: 49728,
-      deskflowPort: 24800,
-      deskflowPath: '',
-      displayId: '',
-      localInput: null,
-      peerInput: null,
-      shortcut: 'control+alt+F12',
-      clipboard: true,
-      clipboardMegabytes: 4,
-      layoutSide: 'off',
-      crossScreenVideo: 'follow',
-      retainedDisplayId: '',
-    },
+    config: defaultConfig('我的电脑'),
     deviceId: 'preview',
     platform: 'preview',
     addresses: [],

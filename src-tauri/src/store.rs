@@ -26,19 +26,38 @@ pub struct Store {
     pub value: Stored,
     pub pairing: String,
 }
+fn decode_settings(bytes: &[u8]) -> Result<Stored> {
+    let mut value: Stored = serde_json::from_slice(bytes).context("配置损坏；未覆盖原文件")?;
+    ensure!([2, 3].contains(&value.version), "配置版本不支持");
+    value.config.validate()?;
+    if value.version == 2 {
+        // Apply the safer default once; preserve identity, pairing and layout.
+        value.config.cross_screen_video = "manual".into();
+        value.version = 3;
+    }
+    Ok(value)
+}
 impl Store {
     pub fn load(directory: PathBuf) -> Result<Self> {
         fs::create_dir_all(&directory)?;
         let file = directory.join("settings.json");
         let value = match fs::read(&file) {
             Ok(bytes) => {
-                let v: Stored = serde_json::from_slice(&bytes).context("配置损坏；未覆盖原文件")?;
-                ensure!(v.version == 2, "配置版本不支持");
-                v.config.validate()?;
-                v
+                let value = decode_settings(&bytes)?;
+                let old: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if old["version"] == 2 {
+                    atomic_write(
+                        &directory.join(format!(
+                            "settings-before-manual-video-{}.json",
+                            Uuid::new_v4()
+                        )),
+                        &bytes,
+                    )?;
+                }
+                value
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stored {
-                version: 2,
+                version: 3,
                 id: Uuid::new_v4(),
                 config: Config::default(),
                 trusted_peer: None,
@@ -89,7 +108,7 @@ impl Store {
             self.pairing = old_code.clone();
             vault
                 .set_password(&old_code)
-                .context("配置写入与配对凭据回滚均失败，请恢复 Preview 备份")?;
+                .context("配置写入与配对凭据回滚均失败，请恢复配置备份")?;
             return Err(error);
         }
         Ok(())
@@ -99,8 +118,10 @@ impl Store {
         let bytes = fs::read(file)?;
         ensure!(bytes.len() < 256 * 1024, "配置文件过大");
         let disk: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let c: Config = serde_json::from_value(disk["config"].clone()).context("旧配置格式无效")?;
+        let mut c: Config =
+            serde_json::from_value(disk["config"].clone()).context("旧配置格式无效")?;
         c.validate()?;
+        c.cross_screen_video = "manual".into();
         let backup = self
             .directory
             .join(format!("settings-before-import-{}.json", Uuid::new_v4()));
@@ -179,7 +200,7 @@ mod tests {
         let mut store = Store {
             directory: dir.path().join("new"),
             value: Stored {
-                version: 2,
+                version: 3,
                 id: Uuid::new_v4(),
                 config: Config::default(),
                 trusted_peer: None,
@@ -192,5 +213,39 @@ mod tests {
         assert!(!fs::read_to_string(store.directory.join("settings.json"))
             .unwrap()
             .contains("unreadable"));
+    }
+    #[test]
+    fn migrates_preview_edge_policy_once_without_changing_identity_or_layout() {
+        for mode in ["follow", "keep"] {
+            let original = Stored {
+                version: 2,
+                id: Uuid::new_v4(),
+                config: Config {
+                    cross_screen_video: mode.into(),
+                    layout_side: "left".into(),
+                    retained_display_id: "internal".into(),
+                    ..Config::default()
+                },
+                trusted_peer: Some(Pin {
+                    id: Uuid::new_v4(),
+                    fingerprint: "a".repeat(64),
+                }),
+                last_verified_address: Some("192.168.1.8".parse().unwrap()),
+            };
+            let mut migrated = decode_settings(&serde_json::to_vec(&original).unwrap()).unwrap();
+            assert_eq!(migrated.version, 3);
+            assert_eq!(migrated.config.cross_screen_video, "manual");
+            assert_eq!(migrated.config.layout_side, "left");
+            assert_eq!(migrated.config.retained_display_id, "internal");
+            assert_eq!(migrated.id, original.id);
+            assert_eq!(migrated.trusted_peer, original.trusted_peer);
+            assert_eq!(
+                migrated.last_verified_address,
+                original.last_verified_address
+            );
+            migrated.config.cross_screen_video = mode.into();
+            let reloaded = decode_settings(&serde_json::to_vec(&migrated).unwrap()).unwrap();
+            assert_eq!(reloaded.config.cross_screen_video, mode);
+        }
     }
 }

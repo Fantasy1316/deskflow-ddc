@@ -8,6 +8,7 @@ pub enum Effect {
 }
 pub struct Policy<'a> {
     pub explicit: bool,
+    pub manual: bool,
     pub keep: bool,
     pub target_retained: bool,
     pub provider_retained: bool,
@@ -28,6 +29,16 @@ pub fn decide(p: Policy<'_>) -> Result<Effect> {
     let source = p
         .video_source
         .ok_or_else(|| anyhow::anyhow!("尚未确定外接屏画面来源"))?;
+    if p.manual {
+        if source == p.target {
+            return Ok(Effect::None);
+        }
+        ensure!(
+            p.target_retained,
+            "目标没有可见屏幕，已拦截边缘跨屏；请使用快捷键或按钮切换画面"
+        );
+        return Ok(Effect::Land);
+    }
     ensure!(
         !(p.keep
             && p.from_provider
@@ -51,6 +62,7 @@ mod tests {
     fn policy() -> Policy<'static> {
         Policy {
             explicit: false,
+            manual: false,
             keep: true,
             target_retained: true,
             provider_retained: true,
@@ -95,5 +107,33 @@ mod tests {
         let mut p = policy();
         p.keep = false;
         assert_eq!(decide(p).unwrap(), Effect::Write);
+    }
+    #[test]
+    fn manual_edges_never_write_video_in_either_direction() {
+        for retained in [false, true] {
+            for from_provider in [false, true] {
+                let mut p = policy();
+                p.manual = true;
+                p.target_retained = retained;
+                p.from_provider = from_provider;
+                p.provider_retained = false;
+                p.requested = true;
+                if retained {
+                    assert_eq!(decide(p).unwrap(), Effect::Land);
+                } else {
+                    assert!(decide(p).is_err());
+                }
+            }
+        }
+        let mut p = policy();
+        p.manual = true;
+        p.target = "receiver";
+        p.target_retained = false;
+        assert_eq!(decide(p).unwrap(), Effect::None);
+        let mut p = policy();
+        p.manual = true;
+        p.explicit = true;
+        p.target_retained = false;
+        assert_eq!(decide(p).unwrap(), Effect::None);
     }
 }

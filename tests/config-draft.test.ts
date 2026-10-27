@@ -1,9 +1,9 @@
 import { effectScope, nextTick, shallowRef } from 'vue'
 import { expect, it } from 'vitest'
 import { useConfigDraft } from '../src/composables/useConfigDraft'
-import { defaults } from '../electron/core/config'
+import { defaultConfig } from '../src/shared/config'
 it('accepts imported IP fallback changes while preserving an unsaved name edit', async () => {
-  const config = shallowRef({ ...defaults('before'), fallbackIps: ['192.168.1.2'] })
+  const config = shallowRef({ ...defaultConfig('before'), fallbackIps: ['192.168.1.2'] })
   const scope = effectScope()
   const draft = scope.run(() => useConfigDraft(() => config.value))!
   draft.draft.deviceName = 'unsaved'

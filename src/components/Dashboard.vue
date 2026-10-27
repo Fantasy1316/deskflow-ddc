@@ -10,6 +10,18 @@ const monitorName = computed(
     (props.state.config.displayId ? '已配置的显示器' : '等待选择显示器'),
 )
 const ready = computed(() => props.state.engine === 'ready' && props.state.connected)
+const videoMode = computed(() =>
+  props.state.config.role === 'host'
+    ? props.state.config.crossScreenVideo
+    : (props.state.sessionLayout?.video ?? 'manual'),
+)
+const videoLabel = computed(() =>
+  videoMode.value === 'manual'
+    ? '画面仅手动切换'
+    : videoMode.value === 'keep'
+      ? '按屏幕配置跨屏'
+      : '画面同步切换',
+)
 const activeName = computed(() =>
   !props.state.activeDeviceId
     ? '尚未开始共享'
@@ -173,14 +185,16 @@ const shortcut = computed(() =>
       <div class="feature-card">
         <span class="feature-icon"><AppIcon name="monitor" /></span>
         <div>
-          <strong>{{
-            (state.config.role === 'host'
-              ? state.config.crossScreenVideo
-              : state.sessionLayout?.video) === 'keep'
-              ? '按屏幕配置跨屏'
-              : '画面同步切换'
-          }}</strong>
-          <p>{{ displayConfigured ? '输入源映射已配置' : '切换电脑，也切换显示器' }}</p>
+          <strong>{{ videoLabel }}</strong>
+          <p>
+            {{
+              videoMode === 'manual'
+                ? '快捷键或按钮切画面，边缘只转移键鼠'
+                : displayConfigured
+                  ? '输入源映射已配置'
+                  : '切换电脑，也切换显示器'
+            }}
+          </p>
         </div>
         <i :class="['feature-indicator', { on: displayConfigured }]"></i>
       </div>

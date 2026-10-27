@@ -58,7 +58,7 @@ pub fn identity(dir: &Path) -> Result<String> {
 fn ini(path: &str) -> String {
     format!("\"{}\"", path.replace('\\', "/").replace('"', "\\\""))
 }
-pub fn server_config(c: &Config, local: &str, peer: &str) -> Result<String> {
+pub fn server_config(c: &Config, local: &str, peer: &str, peer_retained: bool) -> Result<String> {
     c.validate()?;
     uuid::Uuid::parse_str(local)?;
     uuid::Uuid::parse_str(peer)?;
@@ -67,7 +67,15 @@ pub fn server_config(c: &Config, local: &str, peer: &str) -> Result<String> {
     } else {
         (peer, local)
     };
-    let edges = match c.layout_side.as_str() {
+    // With neither computer having a separate visible screen, no edge can
+    // transfer input safely in manual-video mode. Explicit hotkeys still work.
+    let side =
+        if c.cross_screen_video == "manual" && c.retained_display_id.is_empty() && !peer_retained {
+            "off"
+        } else {
+            c.layout_side.as_str()
+        };
+    let edges = match side {
         "left" => Some(("right", "left")),
         "right" => Some(("left", "right")),
         "top" => Some(("down", "up")),
@@ -90,7 +98,7 @@ pub fn server_config(c: &Config, local: &str, peer: &str) -> Result<String> {
             s.into()
         }
     };
-    if edges.is_none() || c.cross_screen_video != "keep" {
+    if c.cross_screen_video != "manual" && (edges.is_none() || c.cross_screen_video != "keep") {
         text += &format!("\tkeystroke({}) = switchToNextScreen\n", chord(&c.shortcut));
     }
     for (key, target) in [
@@ -132,7 +140,7 @@ pub fn prepare(
     )?;
     atomic_write(
         &root.join("server.conf"),
-        server_config(c, local, &peer.id.to_string())?.as_bytes(),
+        server_config(c, local, &peer.id.to_string(), peer.retained_display)?.as_bytes(),
     )?;
     let (host, client) = if c.role == "host" {
         (local.to_string(), peer.id.to_string())
@@ -191,7 +199,7 @@ impl Engine {
         preflight(&std::env::temp_dir().join("deskflow-core")).await?;
         #[cfg(target_os = "macos")]
         {
-            // Stable and Preview derive different Qt namespaces. Probe all of
+            // The 0.1 and 0.2 apps derive different Qt namespaces. Probe all of
             // our known namespaces without sending commands to their engines.
             for entry in std::fs::read_dir(std::env::temp_dir())? {
                 let entry = entry?;
@@ -380,7 +388,8 @@ mod tests {
         assert!(server_config(
             &c,
             &uuid::Uuid::new_v4().to_string(),
-            &uuid::Uuid::new_v4().to_string()
+            &uuid::Uuid::new_v4().to_string(),
+            false,
         )
         .is_err());
     }
@@ -388,6 +397,32 @@ mod tests {
     fn cert_persists_and_fingerprint_is_stable() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(identity(dir.path()).unwrap(), identity(dir.path()).unwrap());
+    }
+    #[test]
+    fn manual_mode_disables_invisible_edges_and_does_not_bind_the_video_shortcut() {
+        let host = uuid::Uuid::new_v4().to_string();
+        let peer = uuid::Uuid::new_v4().to_string();
+        for side in ["left", "right", "top", "bottom"] {
+            let mut c = Config {
+                layout_side: side.into(),
+                ..Config::default()
+            };
+            let config = server_config(&c, &host, &peer, false).unwrap();
+            assert!(!config.contains(" = sb-"));
+            assert!(!config.contains("switchToNextScreen"));
+            assert!(config.contains("switchToScreen"));
+            c.retained_display_id = "internal".into();
+            let config = server_config(&c, &host, &peer, false).unwrap();
+            assert!(config.contains(" = sb-"));
+            assert!(!config.contains("switchToNextScreen"));
+        }
+        let c = Config {
+            layout_side: "left".into(),
+            ..Config::default()
+        };
+        assert!(server_config(&c, &host, &peer, true)
+            .unwrap()
+            .contains(" = sb-"));
     }
 }
 
