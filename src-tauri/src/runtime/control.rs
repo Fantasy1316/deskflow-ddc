@@ -1,5 +1,70 @@
 use super::*;
 
+async fn wait_identified(
+    mut peer: watch::Receiver<Option<Identity>>,
+    closed: &CancellationToken,
+    timeout: Duration,
+) -> Result<Identity> {
+    tokio::select! {
+        biased;
+        _ = closed.cancelled() => bail!("共享会话已结束"),
+        result = tokio::time::timeout(timeout, peer.wait_for(|p| p.is_some())) => {
+            let peer = result.context("双向设备识别超时")?.context("设备识别通道已关闭")?;
+            peer.clone().context("双向设备识别未完成")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn waits_for_delayed_reciprocal_identification_without_missing_completion() {
+        let (identified, peer) = watch::channel(None);
+        let closed = CancellationToken::new();
+        let waiting = wait_identified(peer, &closed, Duration::from_secs(10));
+        tokio::pin!(waiting);
+        // Our own identify response has arrived, but its reciprocal handler has
+        // not run yet. This must remain pending rather than failing the session.
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        let expected = super::super::tests::peer();
+        identified.send_replace(Some(expected.clone()));
+        assert_eq!(waiting.await.unwrap().id, expected.id);
+        // Completion before subscribing must work as well (no lost wakeup).
+        assert_eq!(
+            wait_identified(identified.subscribe(), &closed, Duration::from_secs(10))
+                .await
+                .unwrap()
+                .id,
+            expected.id
+        );
+    }
+    #[tokio::test]
+    async fn identification_wait_ends_on_disconnect_or_timeout() {
+        let (_identified, peer) = watch::channel(None);
+        let closed = CancellationToken::new();
+        let waiting = wait_identified(peer.clone(), &closed, Duration::from_secs(10));
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        closed.cancel();
+        assert!(waiting
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("会话已结束"));
+        assert!(
+            wait_identified(peer, &CancellationToken::new(), Duration::ZERO)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("识别超时")
+        );
+    }
+}
+
 impl Runtime {
     pub(super) async fn host_loop(
         self: Arc<Self>,
@@ -145,7 +210,7 @@ impl Runtime {
             id,
             epoch,
             session: session.clone(),
-            peer: Mutex::new(None),
+            peer: watch::channel(None).0,
         });
         {
             let mut slot = self.link.lock().await;
@@ -215,12 +280,12 @@ impl Runtime {
             .await?;
         let response: Identity = serde_json::from_value(response)?;
         response.validate()?;
-        let peer = link
-            .peer
-            .lock()
-            .await
-            .clone()
-            .context("双向设备识别未完成")?;
+        let peer = wait_identified(
+            link.peer.subscribe(),
+            &link.session.closed,
+            Duration::from_secs(10),
+        )
+        .await?;
         ensure!(
             response.id == peer.id && response.fingerprint == peer.fingerprint,
             "双向设备识别不一致"
@@ -235,6 +300,11 @@ impl Runtime {
         }
         self.log("success", &format!("已与 {} 建立加密连接", peer.name))
             .await;
+        if self.snapshot().await.config.role == "host" {
+            // The host retains the authoritative picture state across reconnects.
+            // The reciprocal identify response proves the receiver can accept it.
+            self.publish_control(link, None).await;
+        }
         self.start_engine(link, &peer, address).await?;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(4));
         loop {
@@ -260,6 +330,10 @@ impl Runtime {
                 link.session.close();
             }
         }
+        // Drain old effects before admitting a new session; an in-flight native
+        // command must not change the picture after the new session starts.
+        let _command = self.commands.lock().await;
+        let _effects = self.effects.lock().await;
         {
             let mut guard = self.engine.lock().await;
             if !self.session_matches(epoch, id) {
@@ -277,16 +351,7 @@ impl Runtime {
         if !self.session_matches(epoch, id) {
             return;
         }
-        i.state.connected = false;
-        i.state.engine = "stopped".into();
-        i.state.peer = None;
-        i.state.session_layout = None;
-        i.state.active_device_id = None;
-        i.state.display_device_id = None;
-        i.state.last_display_device_id = None;
-        i.state.display_status = "uninitialized".into();
-        i.state.switching = false;
-        i.state.connection = None;
+        i.state.control_disconnected();
         self.active_session
             .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
             .ok();
@@ -300,12 +365,12 @@ impl Runtime {
     ) -> Result<Value> {
         ensure!(self.current(link), "共享会话已结束");
         if method == "identify" {
-            let mut identified = link.peer.lock().await;
-            ensure!(identified.is_none(), "已完成设备识别");
             let peer: Identity = serde_json::from_value(payload)?;
             peer.validate()?;
             let mut i = self.inner.lock().await;
             ensure!(self.current(link), "共享会话已结束");
+            // The inner lock serializes duplicate identify requests through save.
+            ensure!(link.peer.borrow().is_none(), "已完成设备识别");
             let c = &i.state.config;
             validate_peer(
                 c,
@@ -318,6 +383,7 @@ impl Runtime {
                 fingerprint: peer.fingerprint.clone(),
             });
             i.store.save()?;
+            i.state.has_saved_pairing = true;
             i.state.peer = Some(Peer {
                 id: peer.id.to_string(),
                 name: peer.name.clone(),
@@ -337,22 +403,18 @@ impl Runtime {
                     video: peer.cross_screen_video.clone(),
                 }
             });
-            i.state.connected = true;
             let host = if c_role(&i.state.config) {
                 i.state.device_id.clone()
             } else {
                 peer.id.to_string()
             };
-            i.state.active_device_id = Some(host.clone());
-            i.state.display_device_id = Some(host.clone());
-            i.state.last_display_device_id = Some(host);
-            *identified = Some(peer);
+            i.state.control_connected(host);
+            link.peer.send_replace(Some(peer));
             drop(i);
-            drop(identified);
             self.publish();
             return Ok(serde_json::to_value(self.identity().await?)?);
         }
-        let peer = link.peer.lock().await.clone().context("尚未识别对端设备")?;
+        let peer = link.peer.borrow().clone().context("尚未识别对端设备")?;
         match method {
             "ping" => Ok(json!("pong")),
             "set-input" => {
@@ -415,7 +477,7 @@ impl Runtime {
     }
     pub(super) async fn event(&self, link: &Link, name: &str, payload: Value) -> Result<()> {
         ensure!(
-            self.current(link) && link.peer.lock().await.is_some(),
+            self.current(link) && link.peer.borrow().is_some(),
             "尚未识别对端设备"
         );
         if name == "display-state" && self.snapshot().await.config.role == "client" {

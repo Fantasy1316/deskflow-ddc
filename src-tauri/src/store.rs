@@ -37,6 +37,16 @@ fn decode_settings(bytes: &[u8]) -> Result<Stored> {
     }
     Ok(value)
 }
+fn prepare_identity(directory: &Path, value: &Stored) -> Result<()> {
+    if !directory.join("identity.pem").exists() {
+        ensure!(
+            value.trusted_peer.is_none() && value.last_verified_address.is_none(),
+            "已配对设备的引擎身份文件缺失，未生成新身份；请恢复应用配置备份"
+        );
+    }
+    crate::engine::identity(directory)?;
+    Ok(())
+}
 impl Store {
     pub fn load(directory: PathBuf) -> Result<Self> {
         fs::create_dir_all(&directory)?;
@@ -65,6 +75,10 @@ impl Store {
             },
             Err(e) => return Err(e.into()),
         };
+        // Commit the engine identity before credentials/settings. A crash on the
+        // first launch can then be retried without leaving an unusable profile.
+        // Older interrupted, never-paired profiles can safely finish this step.
+        prepare_identity(&directory, &value)?;
         let vault = keyring::Entry::new("app.deskflow-ddc.preview", &value.id.to_string())?;
         let pairing = match vault.get_password() {
             Ok(code) => {
@@ -180,6 +194,73 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn unpaired() -> Stored {
+        Stored {
+            version: 3,
+            id: Uuid::new_v4(),
+            config: Config::default(),
+            trusted_peer: None,
+            last_verified_address: None,
+        }
+    }
+    #[test]
+    fn completes_old_interrupted_initialization_without_changing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = unpaired();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let settings = dir.path().join("settings.json");
+        // v0.2.0 could save these settings before writing the first certificate.
+        fs::write(&settings, &bytes).unwrap();
+        prepare_identity(dir.path(), &decode_settings(&bytes).unwrap()).unwrap();
+        let fingerprint = crate::engine::identity(dir.path()).unwrap();
+        prepare_identity(dir.path(), &value).unwrap();
+        assert_eq!(crate::engine::identity(dir.path()).unwrap(), fingerprint);
+        assert_eq!(fs::read(settings).unwrap(), bytes);
+    }
+    #[test]
+    fn identity_failure_can_retry_without_committing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity.pem");
+        fs::create_dir(&identity).unwrap();
+        let value = unpaired();
+        assert!(prepare_identity(dir.path(), &value).is_err());
+        assert!(!dir.path().join("settings.json").exists());
+        fs::remove_dir(identity).unwrap();
+        prepare_identity(dir.path(), &value).unwrap();
+        assert!(dir.path().join("identity.pem").is_file());
+        assert!(!dir.path().join("settings.json").exists());
+    }
+    #[test]
+    fn missing_identity_with_any_pairing_history_is_never_regenerated() {
+        for pinned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut value = unpaired();
+            if pinned {
+                value.trusted_peer = Some(Pin {
+                    id: Uuid::new_v4(),
+                    fingerprint: "a".repeat(64),
+                });
+            } else {
+                value.last_verified_address = Some("192.168.1.8".parse().unwrap());
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(dir.path().join("settings.json"), &bytes).unwrap();
+            assert!(prepare_identity(dir.path(), &value).is_err());
+            assert!(!dir.path().join("identity.pem").exists());
+            assert_eq!(fs::read(dir.path().join("settings.json")).unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn corrupt_existing_identity_is_preserved_even_when_unpaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity.pem");
+        fs::write(&identity, "incomplete certificate").unwrap();
+        assert!(prepare_identity(dir.path(), &unpaired()).is_err());
+        assert_eq!(
+            fs::read_to_string(identity).unwrap(),
+            "incomplete certificate"
+        );
+    }
     #[test]
     fn save_replaces_without_partial_files() {
         let dir = tempfile::tempdir().unwrap();

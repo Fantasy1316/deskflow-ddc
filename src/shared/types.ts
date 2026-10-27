@@ -78,6 +78,7 @@ export interface Snapshot {
   displayDeviceId: string | null
   switching: boolean
   pairingCode: string
+  hasSavedPairing: boolean
   displayStatus?: 'uninitialized' | 'commanded' | 'uncertain'
   lastDisplayDeviceId?: string | null
   dependencies: { deskflow: boolean; displayControl: boolean; accessibility: boolean }

@@ -6,6 +6,7 @@ import type { DiscoveredDevice } from '../shared/types'
 import { z } from 'zod'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
+import { canStartSharing } from '../shared/pairing'
 const props = defineProps<{ state: Snapshot; busy: boolean }>()
 const emit = defineEmits<{ action: [action: Action] }>()
 const { draft, value } = useConfigDraft(() => props.state.config)
@@ -13,6 +14,7 @@ const pairingCode = shallowRef(''),
   showCode = shallowRef(false)
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
 const locked = computed(() => props.busy || props.state.running)
+const canStart = computed(() => canStartSharing(props.state, pairingCode.value))
 const fallbackText = computed({
   get: () => (draft.fallbackIps ?? []).join(', '),
   set: (text: string) => {
@@ -106,7 +108,9 @@ const valid = computed(
             {{
               state.config.role === 'host'
                 ? '在另一台电脑安装 Deskflow DDC，选择接收键鼠，再填写以下信息。'
-                : '查找并选择键鼠提供端，或手动填写主机名和备用 IP，再输入配对码。'
+                : state.hasSavedPairing
+                  ? '已保存配对，可直接开始共享；需要连接其他电脑时，请填写新地址和配对码。'
+                  : '查找并选择键鼠提供端，或手动填写主机名和备用 IP，再输入配对码。'
             }}
           </p>
         </div>
@@ -170,14 +174,16 @@ const valid = computed(
               :disabled="locked"
               placeholder="例如：工作电脑.local" /></label
           ><label class="field"
-            ><span>配对码</span
+            ><span>{{ state.hasSavedPairing ? '配对码（可选）' : '配对码' }}</span
             ><input
               v-model="pairingCode"
               :disabled="locked"
               type="password"
               autocomplete="off"
               spellcheck="false"
-              placeholder="粘贴 SB1- 开头的完整配对码"
+              :placeholder="
+                state.hasSavedPairing ? '已保存配对，留空复用' : '粘贴 SB1- 开头的完整配对码'
+              "
           /></label>
         </div>
         <label class="field fallback-address"
@@ -225,12 +231,7 @@ const valid = computed(
         ><button
           v-else
           class="button primary"
-          :disabled="
-            busy ||
-            dirty ||
-            (state.config.role === 'client' &&
-              ((!state.config.peerAddress && !state.config.fallbackIps?.length) || !pairingCode))
-          "
+          :disabled="busy || dirty || !canStart"
           @click="
             emit('action', {
               type: 'start',
@@ -239,7 +240,11 @@ const valid = computed(
           "
         >
           <AppIcon name="link" :size="16" />{{
-            state.config.role === 'host' ? '开始等待连接' : '配对并开始共享'
+            state.config.role === 'host'
+              ? '开始等待连接'
+              : state.hasSavedPairing
+                ? '开始共享'
+                : '配对并开始共享'
           }}
         </button>
       </div>

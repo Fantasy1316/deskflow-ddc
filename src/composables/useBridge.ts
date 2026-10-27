@@ -21,6 +21,7 @@ function previewSnapshot(): Snapshot {
     displayDeviceId: null,
     switching: false,
     pairingCode: '',
+    hasSavedPairing: false,
     dependencies: { deskflow: false, displayControl: false, accessibility: false },
     logs: [],
     lastError: null,

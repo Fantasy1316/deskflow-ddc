@@ -80,12 +80,86 @@ pub struct Snapshot {
     pub display_status: String,
     pub switching: bool,
     pub pairing_code: String,
+    pub has_saved_pairing: bool,
     pub dependencies: Dependencies,
     pub diagnostics: Value,
     pub logs: Vec<Log>,
     pub last_error: Option<String>,
     pub preview: bool,
     pub connection: Option<Value>,
+}
+impl Snapshot {
+    fn new(store: &Store, diagnostics: &Diagnostics) -> Self {
+        Self {
+            revision: 0,
+            config: store.value.config.clone(),
+            device_id: store.value.id.to_string(),
+            platform: platform().into(),
+            hostname: format!("ddc-{}.local", store.value.id),
+            addresses: discovery::local_addresses(),
+            discovered_devices: vec![],
+            discovering: false,
+            cursor_displays: vec![],
+            session_layout: None,
+            monitors: json!([]),
+            running: false,
+            listening: false,
+            connected: false,
+            engine: "stopped".into(),
+            engine_source: "bundled".into(),
+            peer: None,
+            active_device_id: None,
+            display_device_id: None,
+            last_display_device_id: None,
+            display_status: "uninitialized".into(),
+            switching: false,
+            pairing_code: store.pairing.clone(),
+            has_saved_pairing: store.value.trusted_peer.is_some(),
+            dependencies: Dependencies {
+                deskflow: false,
+                display_control: false,
+                accessibility: false,
+            },
+            diagnostics: json!({"directory":diagnostics.directory,"error":null}),
+            logs: vec![],
+            last_error: None,
+            preview: false,
+            connection: None,
+        }
+    }
+    fn control_connected(&mut self, host: String) {
+        self.connected = true;
+        self.active_device_id = Some(host.clone());
+        // Only the first connection after an explicit start assumes the host picture.
+        // Recreating the input engine does not change the monitor's physical input.
+        if self.display_status == "uninitialized"
+            && self.display_device_id.is_none()
+            && self.last_display_device_id.is_none()
+        {
+            self.display_device_id = Some(host.clone());
+            self.last_display_device_id = Some(host);
+        }
+    }
+    fn control_disconnected(&mut self) {
+        if self.switching {
+            // A DDC command may have reached the monitor before its acknowledgement
+            // was lost. Keep the previous source for diagnostics, never for routing.
+            self.display_device_id = None;
+            self.display_status = "uncertain".into();
+        }
+        self.connected = false;
+        self.engine = "stopped".into();
+        self.peer = None;
+        self.session_layout = None;
+        self.active_device_id = None;
+        self.switching = false;
+        self.connection = None;
+    }
+    fn reset_display(&mut self) {
+        self.display_device_id = None;
+        self.last_display_device_id = None;
+        self.display_status = "uninitialized".into();
+    }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +179,7 @@ struct Link {
     id: u64,
     epoch: u64,
     session: Session,
-    peer: Mutex<Option<Identity>>,
+    peer: watch::Sender<Option<Identity>>,
 }
 #[derive(Clone, Debug)]
 struct Transition {
@@ -147,49 +221,10 @@ pub struct Runtime {
 impl Runtime {
     pub async fn new(directory: PathBuf, resources: PathBuf) -> Result<Arc<Self>> {
         ensure!(platform() != "unsupported", "当前仅支持 macOS 和 Windows");
-        let existed = directory.join("settings.json").exists();
-        ensure!(
-            !existed || directory.join("identity.pem").exists(),
-            "引擎身份文件缺失，未生成新身份；请恢复 应用配置备份"
-        );
         let store = Store::load(directory.clone())?;
         let fingerprint = engine::identity(&directory)?;
         let diagnostics = Diagnostics::new(directory.join("logs"), store.pairing.clone())?;
-        let state = Snapshot {
-            revision: 0,
-            config: store.value.config.clone(),
-            device_id: store.value.id.to_string(),
-            platform: platform().into(),
-            hostname: format!("ddc-{}.local", store.value.id),
-            addresses: discovery::local_addresses(),
-            discovered_devices: vec![],
-            discovering: false,
-            cursor_displays: vec![],
-            session_layout: None,
-            monitors: json!([]),
-            running: false,
-            listening: false,
-            connected: false,
-            engine: "stopped".into(),
-            engine_source: "bundled".into(),
-            peer: None,
-            active_device_id: None,
-            display_device_id: None,
-            last_display_device_id: None,
-            display_status: "uninitialized".into(),
-            switching: false,
-            pairing_code: store.pairing.clone(),
-            dependencies: Dependencies {
-                deskflow: false,
-                display_control: false,
-                accessibility: false,
-            },
-            diagnostics: json!({"directory":diagnostics.directory,"error":null}),
-            logs: vec![],
-            last_error: None,
-            preview: false,
-            connection: None,
-        };
+        let state = Snapshot::new(&store, &diagnostics);
         let (updates, _) = watch::channel(state.clone());
         let (observed, _) = broadcast::channel(32);
         let (completed, _) = broadcast::channel(32);
@@ -386,6 +421,7 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         ensure!(!i.state.running, "请先停止共享");
         i.store.import_legacy_config(&file)?;
+        i.state.has_saved_pairing = false;
         i.state.config = i.store.value.config.clone();
         self.publish();
         drop(i);
@@ -404,6 +440,7 @@ impl Runtime {
         i.store.set_pairing(code.clone())?;
         i.diagnostics.protect(code.clone());
         i.state.pairing_code = code;
+        i.state.has_saved_pairing = false;
         self.publish();
         Ok(())
     }
@@ -458,21 +495,26 @@ impl Runtime {
         );
         if c.role == "client" {
             let mut i = self.inner.lock().await;
-            let code = pairing
-                .filter(|p| !p.trim().is_empty())
-                .unwrap_or_else(|| i.store.pairing.clone());
+            let pairing = pairing.filter(|p| !p.trim().is_empty());
+            ensure!(
+                pairing.is_some() || i.store.value.trusted_peer.is_some(),
+                "首次连接请填写提供端配对码"
+            );
+            let code = pairing.unwrap_or_else(|| i.store.pairing.clone());
             protocol::pairing_key(code.trim())?;
+            ensure!(
+                !c.peer_address.is_empty()
+                    || !c.fallback_ips.is_empty()
+                    || (i.store.value.trusted_peer.is_some() && code.trim() == i.store.pairing),
+                "请选择发现的电脑，或填写主机名和备用 IP"
+            );
             if code.trim() != i.store.pairing {
                 i.store.set_pairing(code.trim().into())?;
                 i.diagnostics.protect(code.trim().into());
             }
             i.state.pairing_code = i.store.pairing.clone();
-            ensure!(
-                !c.peer_address.is_empty()
-                    || !c.fallback_ips.is_empty()
-                    || i.store.value.trusted_peer.is_some(),
-                "请选择发现的电脑，或填写主机名和备用 IP"
-            );
+            i.state.has_saved_pairing = i.store.value.trusted_peer.is_some();
+            self.publish();
         }
         let listener = if c.role == "host" {
             Some(
@@ -574,9 +616,7 @@ impl Runtime {
             i.state.peer = None;
             i.state.session_layout = None;
             i.state.active_device_id = None;
-            i.state.display_device_id = None;
-            i.state.last_display_device_id = None;
-            i.state.display_status = "uninitialized".into();
+            i.state.reset_display();
             i.state.switching = false;
             i.state.connection = None;
         }
@@ -629,8 +669,7 @@ impl Runtime {
                 .await
                 .as_ref()?
                 .peer
-                .lock()
-                .await
+                .borrow()
                 .as_ref()
                 .map(|p| p.shortcut.clone())
         }
@@ -715,7 +754,73 @@ pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Ident
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn peer() -> Identity {
+    fn snapshot() -> Snapshot {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            directory: dir.path().into(),
+            value: crate::store::Stored {
+                version: 3,
+                id: uuid::Uuid::new_v4(),
+                config: Config::default(),
+                trusted_peer: Some(Pin {
+                    id: uuid::Uuid::new_v4(),
+                    fingerprint: "a".repeat(64),
+                }),
+                last_verified_address: None,
+            },
+            pairing: protocol::new_pairing(),
+        };
+        let diagnostics = Diagnostics::new(dir.path().join("logs"), store.pairing.clone()).unwrap();
+        Snapshot::new(&store, &diagnostics)
+    }
+    #[test]
+    fn reconnect_retains_receiver_picture_independently_of_keyboard_owner() {
+        let mut s = snapshot();
+        s.control_connected("provider".into());
+        s.display_device_id = Some("receiver".into());
+        s.last_display_device_id = Some("receiver".into());
+        s.display_status = "commanded".into();
+        s.active_device_id = Some("receiver".into());
+        s.control_disconnected();
+        assert!(!s.connected);
+        assert!(s.active_device_id.is_none());
+        assert!(s.has_saved_pairing);
+        s.control_connected("provider".into());
+        assert_eq!(s.active_device_id.as_deref(), Some("provider"));
+        assert_eq!(s.display_device_id.as_deref(), Some("receiver"));
+        assert_eq!(s.last_display_device_id.as_deref(), Some("receiver"));
+        assert_eq!(s.display_status, "commanded");
+    }
+    #[test]
+    fn reconnect_preserves_uncertainty_until_explicit_restart() {
+        let mut s = snapshot();
+        s.last_display_device_id = Some("receiver".into());
+        s.display_status = "uncertain".into();
+        for _ in 0..2 {
+            s.control_disconnected();
+            s.control_connected("provider".into());
+            assert!(s.display_device_id.is_none());
+            assert_eq!(s.display_status, "uncertain");
+            assert_eq!(s.last_display_device_id.as_deref(), Some("receiver"));
+        }
+        s.control_disconnected();
+        s.reset_display();
+        s.control_connected("provider".into());
+        assert_eq!(s.display_device_id.as_deref(), Some("provider"));
+    }
+    #[test]
+    fn disconnect_during_switch_never_assumes_ddc_failed_to_reach_monitor() {
+        let mut s = snapshot();
+        s.control_connected("provider".into());
+        s.switching = true;
+        s.control_disconnected();
+        s.control_connected("provider".into());
+        assert!(!s.switching);
+        assert!(s.display_device_id.is_none());
+        assert_eq!(s.display_status, "uncertain");
+        assert_eq!(s.last_display_device_id.as_deref(), Some("provider"));
+    }
+    pub(super) fn peer() -> Identity {
         Identity {
             id: uuid::Uuid::new_v4(),
             name: "peer".into(),
