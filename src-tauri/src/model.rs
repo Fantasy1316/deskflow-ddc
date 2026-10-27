@@ -140,6 +140,8 @@ pub struct Pin {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    #[serde(default)]
+    pub app_version: String,
     pub id: uuid::Uuid,
     pub name: String,
     pub platform: String,
@@ -158,6 +160,20 @@ pub struct Identity {
 }
 impl Identity {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.app_version.len() <= 64
+                && self
+                    .app_version
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b".-+".contains(&c)),
+            "对端应用版本无效"
+        );
+        ensure!(
+            self.app_version == env!("CARGO_PKG_VERSION"),
+            "两端应用版本不一致（本机 {}，对端 {}），已阻止启动键鼠引擎；请先停止两端共享并更新到相同版本",
+            env!("CARGO_PKG_VERSION"),
+            if self.app_version.is_empty() { "旧版，未提供版本号" } else { &self.app_version }
+        );
         ensure!(
             ["darwin", "win32"].contains(&self.platform.as_str())
                 && ["host", "client"].contains(&self.role.as_str()),

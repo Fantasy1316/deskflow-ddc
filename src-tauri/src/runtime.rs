@@ -262,6 +262,21 @@ impl Runtime {
         });
         runtime.refresh().await?;
         runtime
+            .trace(
+                "app.started",
+                json!({
+                    "version":env!("CARGO_PKG_VERSION"),
+                    "pid":std::process::id(),
+                    "executable":std::env::current_exe().ok(),
+                    "sharing":false,
+                    "accessibility":runtime.snapshot().await.dependencies.accessibility,
+                }),
+            )
+            .await;
+        if let Err(error) = engine::assert_no_running_engine(&runtime.directory).await {
+            runtime.log("error", &format!("启动检查：{error}")).await;
+        }
+        runtime
             .log(
                 "info",
                 "0.2 使用独立配置与身份；开始共享前请先停止旧版或独立 Deskflow 的共享。",
@@ -454,6 +469,7 @@ impl Runtime {
         let c = &i.state.config;
         c.ready()?;
         Ok(Identity {
+            app_version: env!("CARGO_PKG_VERSION").into(),
             id: i.store.value.id,
             name: c.device_name.clone(),
             platform: platform().into(),
@@ -475,6 +491,12 @@ impl Runtime {
     pub async fn start(self: &Arc<Self>, pairing: Option<String>) -> Result<()> {
         let _lifecycle = self.start_stop.lock().await;
         ensure!(!self.snapshot().await.running, "共享已经启动");
+        self.trace(
+            "sharing.startRequested",
+            json!({"version":env!("CARGO_PKG_VERSION")}),
+        )
+        .await;
+        engine::assert_no_running_engine(&self.directory).await?;
         self.refresh().await?;
         let state = self.snapshot().await;
         let c = state.config;
@@ -580,6 +602,7 @@ impl Runtime {
     }
     pub async fn stop(&self) -> Result<()> {
         let _lifecycle = self.start_stop.lock().await;
+        self.trace("sharing.stopRequested", json!({})).await;
         self.epoch.fetch_add(1, Ordering::AcqRel);
         let network = self.network.lock().await.take();
         if let Some((cancel, _)) = &network {
@@ -605,7 +628,13 @@ impl Runtime {
         let _effects = self.effects.lock().await;
         let mut guard = self.engine.lock().await;
         if let Some(engine) = guard.as_mut() {
+            let pid = engine.pid();
             engine.stop().await?;
+            self.trace(
+                "engine.stopped",
+                json!({"pid":pid,"reason":"sharingStopped"}),
+            )
+            .await;
         }
         *guard = None;
         drop(guard);
@@ -822,6 +851,7 @@ mod tests {
     }
     pub(super) fn peer() -> Identity {
         Identity {
+            app_version: env!("CARGO_PKG_VERSION").into(),
             id: uuid::Uuid::new_v4(),
             name: "peer".into(),
             platform: "win32".into(),
@@ -869,6 +899,38 @@ mod tests {
             &p
         )
         .is_err());
+    }
+    #[test]
+    fn rejects_legacy_or_mismatched_app_before_pairing_or_engine_start() {
+        let c = Config {
+            local_input: Some(17),
+            peer_input: Some(1),
+            ..Config::default()
+        };
+        let id = uuid::Uuid::new_v4();
+        let mut p = peer();
+        assert!(validate_peer(&c, id, None, &p).is_ok());
+        p.app_version = "0.2.0".into();
+        let error = validate_peer(&c, id, None, &p).unwrap_err().to_string();
+        assert!(error.contains("两端应用版本不一致"));
+        assert!(error.contains("阻止启动键鼠引擎"));
+        // Published old builds did not send an application version at all.
+        let mut legacy = serde_json::to_value(peer()).unwrap();
+        legacy.as_object_mut().unwrap().remove("appVersion");
+        let legacy: Identity = serde_json::from_value(legacy).unwrap();
+        assert!(validate_peer(&c, id, None, &legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("旧版，未提供版本号"));
+    }
+    #[test]
+    fn startup_snapshot_never_restores_a_running_input_session() {
+        let s = snapshot();
+        assert!(s.has_saved_pairing);
+        assert!(!s.running && !s.listening && !s.connected);
+        assert_eq!(s.engine, "stopped");
+        assert!(s.peer.is_none());
+        assert!(s.active_device_id.is_none());
     }
     #[test]
     fn parses_only_engine_screen_names() {

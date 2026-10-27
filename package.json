@@ -1,6 +1,6 @@
 {
   "name": "deskflow-ddc",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
   "type": "module",

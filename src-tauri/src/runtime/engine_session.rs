@@ -30,7 +30,9 @@ impl Runtime {
         let binary = self.binary(&c)?;
         let (tx, mut rx) = mpsc::channel(64);
         let (transitions, mut changes) = mpsc::channel(32);
-        *guard = Some(Engine::start(binary, &c, &settings, &dir, tx).await?);
+        let engine = Engine::start(binary.clone(), &c, &settings, &dir, tx).await?;
+        self.trace("engine.started", json!({"pid":engine.pid(),"parentPid":std::process::id(),"binary":binary,"session":link.id,"version":env!("CARGO_PKG_VERSION")})).await;
+        *guard = Some(engine);
         {
             let mut i = self.inner.lock().await;
             if self.current(link) {

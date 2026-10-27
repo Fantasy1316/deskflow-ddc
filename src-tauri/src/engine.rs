@@ -168,7 +168,7 @@ async fn connect_ipc(_path: &Path) -> Result<tokio::net::windows::named_pipe::Na
 }
 async fn preflight(path: &Path) -> Result<()> {
     match tokio::time::timeout(Duration::from_secs(1), connect_ipc(path)).await {
-        Ok(Ok(_)) => bail!("检测到已运行的 Deskflow 引擎，请先退出；不会接管已有进程"),
+        Ok(Ok(_)) => bail!("检测到仍在运行的 Deskflow 引擎，已阻止开始共享。删除旧应用不会结束其进程；请先退出旧版和独立 Deskflow，无法退出时请重启电脑。未接管该引擎"),
         Ok(Err(e)) => {
             let harmless = e.downcast_ref::<std::io::Error>().is_some_and(|e| {
                 matches!(
@@ -182,7 +182,38 @@ async fn preflight(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+// This only opens known IPC endpoints to check ownership; it never sends a
+// control command or terminates a process started by another application.
+pub async fn assert_no_running_engine(dir: &Path) -> Result<()> {
+    let root = std::env::temp_dir();
+    let mut paths = vec![root.join("deskflow-core")];
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(namespace(dir).join("deskflow-core"));
+        // Deleted/replaced .app bundles can leave an engine in the data tree.
+        // Check both Electron and Tauri namespaces before starting any session.
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if entry.file_type()?.is_dir()
+                && (name.starts_with("sb-core-") || name.starts_with("ddc-core-"))
+            {
+                paths.push(entry.path().join("deskflow-core"));
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = dir;
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        preflight(&path).await?;
+    }
+    Ok(())
+}
 pub struct Engine {
+    pid: u32,
     stop: mpsc::Sender<oneshot::Sender<Result<()>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -196,30 +227,12 @@ impl Engine {
     ) -> Result<Self> {
         let temp = namespace(dir);
         std::fs::create_dir_all(&temp)?;
-        preflight(&std::env::temp_dir().join("deskflow-core")).await?;
-        #[cfg(target_os = "macos")]
-        {
-            // The 0.1 and 0.2 apps derive different Qt namespaces. Probe all of
-            // our known namespaces without sending commands to their engines.
-            for entry in std::fs::read_dir(std::env::temp_dir())? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if entry.file_type()?.is_dir()
-                    && (name.starts_with("sb-core-") || name.starts_with("ddc-core-"))
-                {
-                    preflight(&entry.path().join("deskflow-core")).await?;
-                }
-            }
-        }
+        assert_no_running_engine(dir).await?;
         let ipc = if cfg!(target_os = "macos") {
             temp.join("deskflow-core")
         } else {
             std::env::temp_dir().join("deskflow-core")
         };
-        if cfg!(target_os = "macos") {
-            preflight(&ipc).await?;
-        }
         if c.role == "host" {
             drop(
                 tokio::net::TcpListener::bind(("0.0.0.0", c.deskflow_port))
@@ -245,6 +258,7 @@ impl Engine {
         #[cfg(windows)]
         command.creation_flags(0x08000000);
         let mut child = command.spawn().context("无法启动内置键鼠引擎")?;
+        let pid = child.id().context("无法获取键鼠引擎进程 ID")?;
         for pipe in [
             child
                 .stdout
@@ -335,7 +349,10 @@ impl Engine {
             ipc_task.abort();
             let _ = events.send(Event::Exited(reason)).await;
         });
-        Ok(Self { stop, task })
+        Ok(Self { pid, stop, task })
+    }
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
     pub async fn stop(&mut self) -> Result<()> {
         if self.task.is_finished() {
@@ -429,6 +446,21 @@ mod tests {
 #[cfg(all(test, unix))]
 mod process_tests {
     use super::*;
+    #[tokio::test]
+    async fn existing_engine_preflight_never_sends_control_commands() {
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deskflow-core");
+        let server = tokio::net::UnixListener::bind(&path).unwrap();
+        let error = preflight(&path).await.unwrap_err().to_string();
+        assert!(error.contains("阻止开始共享"));
+        let (mut socket, _) = server.accept().await.unwrap();
+        let mut received = [0; 32];
+        assert_eq!(socket.read(&mut received).await.unwrap(), 0);
+        drop(server);
+        // A stale socket file is not evidence that an engine is alive.
+        assert!(preflight(&path).await.is_ok());
+    }
     #[tokio::test]
     async fn escalates_only_owned_child_and_reaps_it() {
         use tokio::io::{AsyncBufReadExt, BufReader};

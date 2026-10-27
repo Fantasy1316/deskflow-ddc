@@ -340,10 +340,13 @@ impl Runtime {
                 return;
             }
             if let Some(engine) = guard.as_mut() {
+                let pid = engine.pid();
                 if let Err(e) = engine.stop().await {
                     self.log("error", &e.to_string()).await;
                     return;
                 }
+                self.trace("engine.stopped", json!({"pid":pid,"reason":"sessionEnded"}))
+                    .await;
             }
             *guard = None;
         }
@@ -378,6 +381,12 @@ impl Runtime {
                 i.store.value.trusted_peer.as_ref(),
                 &peer,
             )?;
+            if let Err(error) = i.diagnostics.record(
+                "peer.identified",
+                json!({"version":peer.app_version,"platform":peer.platform,"id":peer.id}),
+            ) {
+                i.state.diagnostics["error"] = error.to_string().into();
+            }
             i.store.value.trusted_peer = Some(Pin {
                 id: peer.id,
                 fingerprint: peer.fingerprint.clone(),
