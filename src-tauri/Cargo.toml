@@ -8,7 +8,9 @@ license = "MIT"
 
 [lib]
 name = "deskflow_ddc_tauri"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop binaries consume this as a Rust library; mobile/FFI libraries are
+# intentionally omitted so a portable Windows build does not export all APIs.
+crate-type = ["rlib"]
 
 [features]
 default = ["desktop"]

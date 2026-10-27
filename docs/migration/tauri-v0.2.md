@@ -56,3 +56,13 @@
 | Windows 原生构建、双机共享、DDC、变更 IP 后重连 | 待实机验收；CI 工作流已准备但未运行                                      |
 
 准备 Mac 运行库时禁用 BSD tar 的 AppleDouble 元数据输出，避免 Rust 解压产生额外 `._*` 文件而破坏 Qt 框架的资源签名。实际运行库测试同时检查深度签名和可执行性，覆盖该打包故障。主应用通过 Tauri 完成本地包签名，避免仅依赖裸 Rust 二进制的链接器签名。
+
+## Windows 便携测试包（2026-10-27）
+
+已在 macOS 上使用 `x86_64-pc-windows-gnu` 目标成功交叉编译 Windows x64 优化版本，并生成独立便携 ZIP。桌面入口仅使用 Rust `rlib`，不额外构建供移动端或 FFI 使用的动态库。
+
+- 已检查 EXE 为 x64 Windows GUI 格式，并包含图标和版本资源。
+- 根据 PE 导入表补齐 `WebView2Loader.dll`；其余应用入口依赖为 Windows 系统库。
+- 随包保留 Windows 平台的 Deskflow 1.27.0 完整运行库、原生桥、源码及许可材料，并核对压缩包和核心程序的 SHA-256。
+- 解压后运行 `Deskflow DDC Preview.exe`，不要只复制 EXE；Windows 需已安装 Microsoft Edge WebView2 Runtime。
+- 本次未在 Windows 上运行程序或执行 Rust 测试；Windows 原生 CI 和两端实际共享仍由后续测试验证。
