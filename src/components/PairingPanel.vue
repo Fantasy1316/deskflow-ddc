@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, shallowRef } from 'vue'
 import AppIcon from './AppIcon.vue'
+import DeviceDiscovery from './DeviceDiscovery.vue'
+import type { DiscoveredDevice } from '../shared/types'
+import { z } from 'zod'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
 const props = defineProps<{ state: Snapshot; busy: boolean }>()
@@ -10,8 +13,25 @@ const pairingCode = shallowRef(''),
   showCode = shallowRef(false)
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
 const locked = computed(() => props.busy || props.state.running)
+const fallbackText = computed({
+  get: () => (draft.fallbackIps ?? []).join(', '),
+  set: (text: string) => {
+    draft.fallbackIps = text.split(/[,，;；\s]+/).filter(Boolean)
+  },
+})
+function chooseDevice(device: DiscoveredDevice) {
+  draft.peerAddress = device.hostname
+  draft.controlPort = device.port
+  draft.fallbackIps = [...device.addresses]
+}
 const valid = computed(
-  () => draft.deviceName.trim().length > 0 && draft.controlPort !== draft.deskflowPort,
+  () =>
+    draft.deviceName.trim().length > 0 &&
+    draft.controlPort !== draft.deskflowPort &&
+    z
+      .array(z.string().ip())
+      .max(8)
+      .safeParse(draft.fallbackIps ?? []).success,
 )
 </script>
 <template>
@@ -67,6 +87,16 @@ const valid = computed(
         </div>
       </div>
     </form>
+    <div class="inline-info">
+      Preview 的身份和配置独立于旧版。可导入旧版设备设置，之后需要重新配对。
+      <button
+        class="text-button"
+        :disabled="locked"
+        @click="emit('action', { type: 'importLegacyConfig' })"
+      >
+        导入旧版配置
+      </button>
+    </div>
     <div class="panel">
       <div class="panel-heading">
         <span class="section-icon"><AppIcon name="link" /></span>
@@ -76,7 +106,7 @@ const valid = computed(
             {{
               state.config.role === 'host'
                 ? '在另一台电脑安装 Deskflow DDC，选择接收键鼠，再填写以下信息。'
-                : '填写键鼠提供端显示的地址和完整配对码。'
+                : '查找并选择键鼠提供端，或手动填写主机名和备用 IP，再输入配对码。'
             }}
           </p>
         </div>
@@ -85,7 +115,9 @@ const valid = computed(
       <template v-if="state.config.role === 'host'"
         ><div class="pairing-details">
           <div class="connection-address">
-            <span class="field-label">本机局域网地址</span
+            <span class="field-label">本机主机名</span
+            ><strong>{{ state.hostname || '暂未获取' }}</strong
+            ><span class="field-label">备用 IP</span
             ><strong>{{ state.addresses.join(' / ') || '暂未获取' }}</strong
             ><small
               >控制端口 {{ state.config.controlPort }} · 键鼠端口
@@ -122,14 +154,21 @@ const valid = computed(
         </div>
         <p class="hint">配对码用于认证这两台设备。请只在你自己的另一台电脑上输入。</p></template
       >
-      <template v-else
-        ><div class="two-fields">
+      <template v-else>
+        <DeviceDiscovery
+          :devices="state.discoveredDevices ?? []"
+          :searching="!!state.discovering"
+          :disabled="locked"
+          @refresh="emit('action', { type: 'discover' })"
+          @select="chooseDevice"
+        />
+        <div class="two-fields">
           <label class="field"
-            ><span>提供端地址</span
+            ><span>提供端主机名（也可填写 IP）</span
             ><input
               v-model="draft.peerAddress"
               :disabled="locked"
-              placeholder="例如：192.168.1.10" /></label
+              placeholder="例如：工作电脑.local" /></label
           ><label class="field"
             ><span>配对码</span
             ><input
@@ -141,6 +180,16 @@ const valid = computed(
               placeholder="粘贴 SB1- 开头的完整配对码"
           /></label>
         </div>
+        <label class="field"
+          ><span>备用 IP（可选，用逗号分隔，最多 8 个）</span
+          ><input
+            v-model="fallbackText"
+            :disabled="locked"
+            placeholder="例如：192.168.1.10"
+          /><small
+            >每次重连会重新解析主机名；解析失败时尝试发现的地址、备用 IP 和上次已认证地址。</small
+          ></label
+        >
         <p v-if="dirty" class="hint">地址已修改，请先点击上方“保存设备设置”。</p></template
       >
       <div v-if="state.peer" class="paired-device">
@@ -179,7 +228,8 @@ const valid = computed(
           :disabled="
             busy ||
             dirty ||
-            (state.config.role === 'client' && (!state.config.peerAddress || !pairingCode))
+            (state.config.role === 'client' &&
+              ((!state.config.peerAddress && !state.config.fallbackIps?.length) || !pairingCode))
           "
           @click="
             emit('action', {

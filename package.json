@@ -1,28 +1,36 @@
 {
   "name": "deskflow-ddc",
-  "version": "0.1.11",
+  "version": "0.2.0-alpha.1",
   "private": true,
   "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
   "type": "module",
   "main": "dist-electron/electron/main.js",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "tauri dev",
     "dev:web": "vite --host 127.0.0.1",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
-    "build": "pnpm typecheck && vite build && tsc -p tsconfig.electron.json",
+    "build": "pnpm build:web",
     "test": "vitest run",
     "build:native": "node scripts/build-native.mjs",
-    "pack:mac": "pnpm build:native && pnpm build && electron-builder --mac dir",
-    "pack:win": "pnpm build && electron-builder --win portable --x64",
+    "pack:mac": "pnpm build:tauri --bundles app",
+    "pack:win": "pnpm build:tauri --bundles nsis",
     "test:native": "node scripts/test-native.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "dev:electron": "node scripts/dev.mjs",
+    "tauri": "tauri",
+    "build:tauri": "tauri build --no-binary-patching",
+    "build:web": "vue-tsc --noEmit && vite build",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
+    "prepare:engine": "node scripts/prepare-engine.mjs",
+    "build:electron": "pnpm typecheck && vite build && tsc -p tsconfig.electron.json"
   },
   "dependencies": {
     "vue": "^3.5.21",
     "lucide-vue-next": "^0.468.0",
     "selfsigned": "^3.0.1",
-    "zod": "^3.25.0"
+    "zod": "^3.25.0",
+    "@tauri-apps/api": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
@@ -33,7 +41,8 @@
     "vite": "^7.1.5",
     "vitest": "^3.2.4",
     "vue-tsc": "^3.0.6",
-    "prettier": "3.6.2"
+    "prettier": "3.6.2",
+    "@tauri-apps/cli": "^2.0.0"
   },
   "build": {
     "appId": "app.deskflow-ddc.desktop",

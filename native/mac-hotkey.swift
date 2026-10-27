@@ -3,6 +3,20 @@ import CoreGraphics
 import ApplicationServices
 
 let action = CommandLine.arguments.dropFirst().first ?? "check"
+if action == "screens" {
+    var count: UInt32 = 0
+    CGGetActiveDisplayList(0, nil, &count)
+    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    CGGetActiveDisplayList(count, &ids, &count)
+    let panels: [[String: Any]] = ids.prefix(Int(count)).map { id in
+        let b = CGDisplayBounds(id)
+        return ["id": String(id), "name": CGDisplayIsBuiltin(id) != 0 ? "内置屏幕" : "屏幕 \(id)", "internal": CGDisplayIsBuiltin(id) != 0,
+                "bounds": ["x": b.origin.x, "y": b.origin.y, "width": b.width, "height": b.height]]
+    }
+    let data = try JSONSerialization.data(withJSONObject: panels)
+    print(String(data: data, encoding: .utf8)!)
+    exit(0)
+}
 if action == "check" {
     print(AXIsProcessTrusted() ? "true" : "false")
     exit(0)

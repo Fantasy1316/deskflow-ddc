@@ -1,4 +1,4 @@
-param([ValidateSet('list','set','host','peer','pointer','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
+param([ValidateSet('list','set','host','peer','pointer','screens','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 Add-Type -TypeDefinition @'
@@ -26,6 +26,21 @@ public static class ScreenBridgeNative {
   [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  public class Panel { public string id; public string name; public bool @internal = false; public Area bounds; }
+  public class Area { public int x,y,width,height; }
+  public static List<Panel> Screens() {
+    var previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    try {
+      var result = new List<Panel>();
+      Callback callback = delegate(IntPtr monitor,IntPtr hdc,IntPtr rect,IntPtr data) {
+        var info = new MonitorInfo {size=Marshal.SizeOf(typeof(MonitorInfo))};
+        if(GetMonitorInfo(monitor,ref info)) result.Add(new Panel {id=monitor.ToInt64().ToString(),name=info.device,bounds=new Area {x=info.monitor.left,y=info.monitor.top,width=info.monitor.right-info.monitor.left,height=info.monitor.bottom-info.monitor.top}});
+        return true;
+      };
+      if(!EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,callback,IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      return result;
+    } finally { if(previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous); }
+  }
   public static void Position(int x, int y) {
     var previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
     try {
@@ -73,6 +88,7 @@ public static class ScreenBridgeNative {
 '@
 function Invoke-NativeCommand([string]$Command, [string]$Monitor, [int]$InputValue, [int]$PointerX, [int]$PointerY) {
   switch ($Command) {
+    'screens' { $items = [ScreenBridgeNative]::Screens(); return ,@($items.ToArray()) }
     'list' { $items = [ScreenBridgeNative]::Monitors('', $null); return ,@($items.ToArray()) }
     'set' { if ($InputValue -lt 0 -or $InputValue -gt 65535) { throw 'Invalid input value' }; [void][ScreenBridgeNative]::Monitors($Monitor, $InputValue); return @{ sent = $true } }
     'host' { [ScreenBridgeNative]::Hotkey($true); return @{ sent = $true } }
@@ -90,7 +106,7 @@ try {
       try {
         if ($line.Length -gt 16384) { throw 'Native request too large' }
         $request = ConvertFrom-Json -InputObject $line
-        if ($null -eq $request.id -or $request.action -notin @('list','set','host','peer','pointer')) { throw 'Invalid native request' }
+        if ($null -eq $request.id -or $request.action -notin @('list','set','host','peer','pointer','screens')) { throw 'Invalid native request' }
         $result = Invoke-NativeCommand $request.action $request.monitorId $request.value $request.x $request.y
         $response = @{ id = $request.id; ok = $true; result = $result }
       } catch { $response = @{ id = $request.id; ok = $false; error = $_.Exception.Message } }

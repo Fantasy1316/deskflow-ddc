@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Deskflow DDC Preview",
+  "version": "0.2.0-alpha.1",
+  "identifier": "app.deskflow-ddc.preview",
+  "build": {
+    "beforeDevCommand": "pnpm dev:web",
+    "beforeBuildCommand": "pnpm build:web",
+    "devUrl": "http://127.0.0.1:5174",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Deskflow DDC Preview",
+        "width": 1120,
+        "height": 800,
+        "minWidth": 860,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../resources/icons/app.png",
+      "../resources/icons/app.icns",
+      "../resources/icons/app.ico"
+    ],
+    "resources": {
+      "resources/": "resources/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
+    }
+  },
+  "mainBinaryName": "deskflow-ddc-preview"
+}

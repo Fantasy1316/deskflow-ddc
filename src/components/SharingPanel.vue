@@ -166,16 +166,22 @@ const label = (value: string) =>
         <span class="section-icon"><AppIcon name="cable" /></span>
         <div>
           <h2>本机运行环境</h2>
-          <p>两端均需安装 Deskflow 1.27.x，开始共享前关闭独立运行的 Deskflow。</p>
+          <p>
+            已内置 Deskflow 1.27.0，无需另行安装。开始共享前请退出其他 Deskflow 实例及旧版共享。
+          </p>
         </div>
       </div>
       <div class="dependency-row">
         <div>
           <strong>键鼠与剪贴板引擎</strong>
-          <p>{{ state.config.deskflowPath || '自动查找已安装的 Deskflow' }}</p>
+          <p>{{ state.config.deskflowPath || '使用内置 Deskflow 1.27.0（离线可用）' }}</p>
         </div>
         <span :class="['badge', state.dependencies.deskflow ? 'success' : 'neutral']">{{
-          state.dependencies.deskflow ? '已找到' : '未检测到'
+          state.dependencies.deskflow
+            ? state.engineSource === 'external'
+              ? '外部引擎'
+              : '内置就绪'
+            : '引擎未准备'
         }}</span
         ><button
           class="button secondary compact"
@@ -185,6 +191,14 @@ const label = (value: string) =>
           选择程序
         </button>
       </div>
+      <button
+        v-if="state.config.deskflowPath"
+        class="text-button"
+        :disabled="locked"
+        @click="emit('action', { type: 'useBundledEngine' })"
+      >
+        恢复使用内置引擎
+      </button>
       <div class="dependency-row">
         <div>
           <strong>显示器控制后端</strong>

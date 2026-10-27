@@ -4,6 +4,7 @@ export interface Config {
   deviceName: string
   role: Role
   peerAddress: string
+  fallbackIps?: string[]
   controlPort: number
   deskflowPort: number
   deskflowPath: string
@@ -47,7 +48,20 @@ export interface LogEntry {
   level: 'info' | 'success' | 'error'
   message: string
 }
+export interface DiscoveredDevice {
+  id: string
+  name: string
+  hostname: string
+  addresses: string[]
+  port: number
+}
 export interface Snapshot {
+  revision?: number
+  hostname?: string
+  engineSource?: 'bundled' | 'external'
+  discoveredDevices?: DiscoveredDevice[]
+  discovering?: boolean
+  connection?: { address: string; source: string; authenticated: boolean } | null
   cursorDisplays: CursorDisplay[]
   sessionLayout: SessionLayout | null
   config: Config

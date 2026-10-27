@@ -13,6 +13,7 @@ execFileSync(
   'clang',
   [
     '-fmodules',
+    '-mmacosx-version-min=14.0',
     `-fmodules-cache-path=${cache}`,
     '-Iresources/vendor/m1ddc/headers',
     '-framework',
@@ -33,7 +34,15 @@ execFileSync(
 )
 execFileSync(
   'swiftc',
-  ['-module-cache-path', cache, 'native/mac-hotkey.swift', '-o', 'resources/bin/mac-hotkey'],
+  [
+    '-target',
+    'arm64-apple-macosx14.0',
+    '-module-cache-path',
+    cache,
+    'native/mac-hotkey.swift',
+    '-o',
+    'resources/bin/mac-hotkey',
+  ],
   { stdio: 'inherit' },
 )
 console.log('原生 DDC 与快捷键桥已编译。')

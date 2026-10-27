@@ -1,0 +1,64 @@
+[package]
+name = "deskflow-ddc-tauri"
+version = "0.2.0-alpha.1"
+edition = "2021"
+default-run = "deskflow-ddc-preview"
+rust-version = "1.90"
+license = "MIT"
+
+[lib]
+name = "deskflow_ddc_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["desktop"]
+custom-protocol = ["tauri/custom-protocol"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-clipboard-manager", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-single-instance"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+futures-util = { version = "0.3", features = ["sink"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+mdns-sd = "0.13"
+if-addrs = "0.13"
+hostname = "0.4"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+libc = "0.2"
+tar = "0.4"
+flate2 = "1"
+tauri = { package = "tauri", version = "2", features = ["tray-icon", "image-png"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+
+tauri-plugin-single-instance = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "deskflow-ddc-preview"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = "thin"

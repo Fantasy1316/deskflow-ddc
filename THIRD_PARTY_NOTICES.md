@@ -6,8 +6,14 @@ The Apple Silicon DDC helper is built from [waydabber/m1ddc](https://github.com/
 
 ## Deskflow
 
-[Deskflow](https://github.com/deskflow/deskflow) is installed separately by the user. Deskflow DDC starts its external `deskflow-core` process and generates isolated settings. It does not bundle Deskflow binaries or link to Deskflow code. Integration was checked against tag v1.27.0 (GPL-2.0-only WITH LicenseRef-OpenSSL-Exception); retain the license notices of your Deskflow installation.
+[Deskflow](https://github.com/deskflow/deskflow) 1.27.0 is bundled as a separate, unmodified `deskflow-core` process, with its official runtime dependencies. It is not linked into the Rust application. The runtime is prepared from official release assets verified with pinned SHA-256 digests. Its corresponding source at commit `081f6478e654a112168879e67a41ce7d7e4ae3af` and license texts are shipped in `resources/deskflow/` inside each application. This project is independent of the Deskflow maintainers.
+
+Deskflow uses GPL-2.0-only WITH LicenseRef-OpenSSL-Exception. Its Qt, OpenSSL, Microsoft runtime and other dependencies retain their respective licenses. The preparation script preserves the complete upstream runtime directory, including DLLs/frameworks and any provided notices. See the bundled source archive and `resources/deskflow/licenses/` for Deskflow notices. Original MIT application code does not replace third-party licenses.
+
+## Rust and Tauri dependencies
+
+Tauri 2, its plugins, Tokio, serde, mdns-sd, keyring, rcgen and cryptographic crates retain their upstream licenses. `src-tauri/Cargo.lock` records exact versions. The system WebView is WKWebView on macOS and Microsoft Edge WebView2 on Windows. WebView2 may require installation on Windows machines where it is absent.
 
 ## JavaScript dependencies
 
-Electron, Vue, Vite, TypeScript, zod, selfsigned and the Lucide icon package retain their upstream licenses. `pnpm-lock.yaml` records exact dependency versions. Dependency package license files are preserved in the packaged application dependency tree; Electron also includes its license and Chromium notices. Original application code is licensed under the MIT license; see `LICENSE`. Third-party licenses are not replaced by the project license.
+Vue, Vite, TypeScript, zod and the Lucide icon package retain their upstream licenses. `pnpm-lock.yaml` records exact dependency versions. The Tauri application ships compiled frontend assets and uses the system WebView; it does not ship an Electron/Chromium runtime. Electron and selfsigned are retained only for legacy regression tests on this migration branch. Original application code is licensed under the MIT license; see `LICENSE`. Third-party licenses are not replaced by the project license.

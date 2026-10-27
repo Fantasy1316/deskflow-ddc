@@ -9,13 +9,14 @@ export function useConfigDraft(source: () => Config) {
       // Keep edited fields; absorb unrelated external changes such as selecting
       // the engine executable. A successful save becomes the new baseline.
       for (const key of Object.keys(incoming) as (keyof Config)[]) {
-        if (draft[key] === baseline[key]) Object.assign(draft, { [key]: incoming[key] })
+        if (JSON.stringify(draft[key]) === JSON.stringify(baseline[key]))
+          Object.assign(draft, { [key]: incoming[key] })
       }
       baseline = { ...incoming }
     },
   )
   function value(): Config {
-    return { ...draft }
+    return { ...draft, ...(draft.fallbackIps ? { fallbackIps: [...draft.fallbackIps] } : {}) }
   }
   return { draft, value }
 }

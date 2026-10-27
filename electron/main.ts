@@ -259,6 +259,10 @@ else {
                 await runtime!.save({ ...runtime!.state.config, deskflowPath: result.filePaths[0] })
               break
             }
+            case 'discover':
+            case 'importLegacyConfig':
+            case 'useBundledEngine':
+              throw new Error('该功能仅在 Tauri Preview 中提供')
             default:
               unreachableAction(action)
           }

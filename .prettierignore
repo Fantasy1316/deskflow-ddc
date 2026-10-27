@@ -8,3 +8,6 @@ resources/
 native/
 pnpm-lock.yaml
 THIRD_PARTY_NOTICES.md
+
+src-tauri/target/
+src-tauri/resources/

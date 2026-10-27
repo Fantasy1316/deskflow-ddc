@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { configSchema } from '../../electron/core/config.js'
+import { configSchema } from './config.js'
 
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('save'), config: configSchema }).strict(),
@@ -9,6 +9,9 @@ export const actionSchema = z.discriminatedUnion('type', [
   ...(
     [
       'scan',
+      'discover',
+      'importLegacyConfig',
+      'useBundledEngine',
       'stop',
       'chooseDeskflow',
       'rotatePairing',

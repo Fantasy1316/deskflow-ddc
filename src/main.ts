@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import './style.css'
 import type { RendererError } from './shared/types'
+import { installTauriBridge } from './transport/tauri'
 function reportError(error: unknown, source: RendererError['source']) {
   const detail =
     error instanceof Error
@@ -17,6 +18,13 @@ window.addEventListener('error', (event) =>
 window.addEventListener('unhandledrejection', (event) =>
   reportError(event.reason, 'window.unhandledrejection'),
 )
-const app = createApp(App)
-app.config.errorHandler = (error) => reportError(error, 'vue')
-app.mount('#app')
+async function bootstrap() {
+  await installTauriBridge()
+  const app = createApp(App)
+  app.config.errorHandler = (error) => reportError(error, 'vue')
+  app.mount('#app')
+}
+void bootstrap().catch((error) => {
+  const root = document.getElementById('app')
+  if (root) root.textContent = `无法连接应用后端：${String(error)}`
+})

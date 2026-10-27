@@ -1,59 +1,53 @@
 # 从源码构建
 
+此分支构建独立的 Deskflow DDC Preview。Electron 稳定版保留在 `v0.1.11` 标签。
+
 ## 环境
 
-- Node.js 22.13 或更新版本。
-- pnpm 11。
-- Apple Silicon macOS 或 Windows x64。
-- macOS 编译原生程序需要 Xcode Command Line Tools。
+- Node.js 22.13 或更新版本、pnpm。
+- Rust 1.90 或更新版本，推荐当前 stable 工具链。
+- macOS：Apple Silicon、macOS 14+、Xcode Command Line Tools。
+- Windows：x64、Visual Studio C++ Build Tools、Windows SDK、Microsoft Edge WebView2。
 
 ```sh
-pnpm install --frozen-lockfile
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm prepare:engine
 ```
 
-## 本地运行
+`prepare:engine` 下载固定版本的 Deskflow 官方资源和对应源码，核对预置 SHA-256，再准备本机原生辅助程序。生成文件放在 `src-tauri/resources/`，下载缓存在 `.engine-cache/`，均不提交 Git。首次准备需要联网；准备完成后，引擎启动不需要下载。
 
-macOS 首次运行先编译原生显示器和快捷键桥：
+运行库以 `runtime.tar.gz` 随应用分发，避免打包工具展开 Qt 框架符号链接而增大体积。首次打开 Preview 时校验并解压到独立数据目录的 `engine/` 中；后续启动校验核心程序并复用缓存。应用更新不改变相同上游引擎版本的缓存路径，避免仅因应用更新导致辅助功能授权对象改变。
 
-```sh
-pnpm build:native
-```
+支持的资源目标是 `darwin/arm64` 和 `win32/x64`。可通过 `--cache` 选择已校验的离线缓存目录。macOS 准备脚本只编译本项目提供的原生桥，不修改已经安装的 Deskflow。
 
-Windows 使用 PowerShell 调用系统原生 API，不需要执行此步骤。
+## 运行与检查
 
 ```sh
 pnpm dev
-```
-
-`pnpm dev:web` 只预览界面，不具备桌面硬件功能。两台电脑均需单独安装 Deskflow，使用方法见 [README](../README.md)。
-
-## 检查
-
-```sh
-pnpm typecheck
-pnpm format:check
+pnpm build:web
 pnpm test
-pnpm build
+pnpm test:rust
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --test bundled_runtime -- --ignored
 ```
 
-macOS 可运行 `pnpm test:native` 验证 DDC 回包解析。网络测试会绑定本机 TCP 端口；模拟显示器和 Deskflow 的测试不能代替真实双机验证。
+`pnpm dev:web` 仅运行 Vue 预览，地址为 `http://127.0.0.1:5174/`。硬件功能需要 Tauri 桌面应用。
+
+`test:rust` 运行不依赖桌面框架的后端测试；完整 `cargo test` 也检查 Tauri 命令。网络测试使用本机随机端口，进程测试只结束测试自己创建的子进程。
+
+`bundled_runtime` 单独验证已准备的官方运行库：在临时目录解压、校验、执行 `--version` 并验证缓存复用，不启动共享或操作显示器。
 
 ## 打包
 
 ```sh
-pnpm pack:mac
-pnpm pack:win
+pnpm prepare:engine
+pnpm build:tauri
 ```
 
-产物位于 `release/`。Windows 包为便携应用，macOS 包为应用目录。Windows EXE 资源编辑依赖打包工具链，跨平台构建可能需要额外环境；优先在目标系统构建验证。
+在目标操作系统构建。macOS 的 `.app` 和 Windows 安装包位于 `src-tauri/target/release/bundle/`。本分支的 Mac 包使用本地 ad-hoc 签名保证包内文件完整性，未作 Developer ID 签名或公证；Windows 包也未作发行签名。不要仅分发裸二进制，必须保留内置引擎、框架/DLL、原生桥和源码许可材料。
 
-也可以使用经过校验的 Electron 运行时 ZIP 进行目录打包：
+Windows 使用系统 WebView2。没有安装 WebView2 的机器，安装程序需要获取微软运行时；该部分不能视作完全离线安装。
 
-```sh
-node scripts/package-local.mjs darwin-arm64 /path/to/electron-vVERSION-darwin-arm64.zip
-node scripts/package-local.mjs win32-x64 /path/to/electron-vVERSION-win32-x64.zip
-```
+`.github/workflows/tauri-preview.yml` 提供 macOS ARM64 / Windows x64 的原生构建与测试，只上传构建产物，不创建 GitHub Release。
 
-ZIP 版本需与已安装的 Electron 依赖一致。脚本验证 SHA-256 后才解压；目录产物位于 `release/<应用版本>/<平台>/`。此脚本使用 `unzip`，macOS 还需要 Python 3 和 `codesign`；不包含发布签名、公证或自动更新。
-
-分发时保留项目许可证、第三方声明和运行时附带的许可文件。请勿将用户配置、配对密钥、私钥或诊断日志提交到仓库。
+旧 Electron 脚本和测试暂时保留，用于行为回归与迁移对照；新应用入口为 `src-tauri/src/main.rs`，不会把 Electron 打入 Tauri 产物。
