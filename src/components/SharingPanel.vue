@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import AppIcon from './AppIcon.vue'
 import PointerSettings from './PointerSettings.vue'
+import ModifierSettings from './ModifierSettings.vue'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
 const props = defineProps<{ state: Snapshot; busy: boolean; checkingAccessibility: boolean }>()
@@ -75,6 +76,13 @@ const label = (value: string) =>
       <div v-if="reservedShortcut" class="inline-info" role="alert">
         F12 是 Windows 保留键。请选择 Ctrl + Alt + F10 或 F9，保存后重新开始共享。
       </div>
+      <ModifierSettings
+        v-model="draft.modifierMapping"
+        :locked="locked"
+        :is-host="isHost"
+        :connected="state.connected"
+        :host-mapping="state.peer?.modifierMapping"
+      />
       <PointerSettings
         v-model:side="draft.layoutSide"
         v-model:video="draft.crossScreenVideo"

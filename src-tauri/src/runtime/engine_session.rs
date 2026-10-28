@@ -7,6 +7,7 @@ impl Runtime {
         peer: &Identity,
         address: std::net::IpAddr,
     ) -> Result<()> {
+        let _lifecycle = self.start_stop.lock().await;
         let mut guard = self.engine.lock().await;
         ensure!(self.current(link), "共享会话已结束");
         ensure!(guard.is_none(), "上一份引擎尚未退出");
@@ -20,6 +21,7 @@ impl Runtime {
         };
         if c.role == "client" {
             c.shortcut = peer.shortcut.clone();
+            c.modifier_mapping = peer.modifier_mapping;
             c.clipboard = peer.clipboard;
             c.clipboard_megabytes = peer.clipboard_megabytes;
             c.deskflow_port = peer.deskflow_port;

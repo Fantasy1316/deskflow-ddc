@@ -1,13 +1,13 @@
 {
   "name": "deskflow-ddc",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
     "dev:web": "vite --host 127.0.0.1",
-    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "vue-tsc --noEmit && vue-tsc -p tsconfig.node.json --noEmit",
     "build": "pnpm build:web",
     "test": "vitest run",
     "build:native": "node scripts/build-native.mjs",

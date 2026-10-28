@@ -10,6 +10,33 @@ pub fn platform() -> &'static str {
         "unsupported"
     }
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModifierMapping {
+    #[default]
+    Original,
+    Common,
+}
+impl ModifierMapping {
+    pub fn swaps_between(self, source: &str, target: &str) -> bool {
+        self == Self::Common
+            && matches!((source, target), ("darwin", "win32") | ("win32", "darwin"))
+    }
+    pub fn receiver_shortcut(self, shortcut: &str, source: &str, target: &str) -> String {
+        if !self.swaps_between(source, target) {
+            return shortcut.into();
+        }
+        shortcut
+            .split('+')
+            .map(|key| match key {
+                "control" => "super",
+                "super" => "control",
+                _ => key,
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -25,6 +52,8 @@ pub struct Config {
     pub local_input: Option<u16>,
     pub peer_input: Option<u16>,
     pub shortcut: String,
+    #[serde(default)]
+    pub modifier_mapping: ModifierMapping,
     pub clipboard: bool,
     pub clipboard_megabytes: u8,
     pub layout_side: String,
@@ -51,6 +80,7 @@ impl Default for Config {
             local_input: None,
             peer_input: None,
             shortcut: "control+alt+F10".into(),
+            modifier_mapping: ModifierMapping::Original,
             clipboard: true,
             clipboard_megabytes: 4,
             layout_side: "off".into(),
@@ -150,6 +180,8 @@ pub struct Identity {
     pub local_input: u16,
     pub peer_input: u16,
     pub shortcut: String,
+    #[serde(default)]
+    pub modifier_mapping: ModifierMapping,
     pub clipboard: bool,
     pub clipboard_megabytes: u8,
     pub deskflow_port: u16,
@@ -189,6 +221,7 @@ impl Identity {
             local_input: Some(self.local_input),
             peer_input: Some(self.peer_input),
             shortcut: self.shortcut.clone(),
+            modifier_mapping: self.modifier_mapping,
             clipboard_megabytes: self.clipboard_megabytes,
             deskflow_port: self.deskflow_port,
             layout_side: self.layout_side.clone(),
@@ -207,6 +240,37 @@ pub fn valid_fingerprint(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_config_defaults_to_original_modifiers_and_rejects_unknown_modes() {
+        let mut config = serde_json::to_value(Config::default()).unwrap();
+        config.as_object_mut().unwrap().remove("modifierMapping");
+        let decoded: Config = serde_json::from_value(config.clone()).unwrap();
+        assert_eq!(decoded.modifier_mapping, ModifierMapping::Original);
+        config["modifierMapping"] = "common".into();
+        let decoded: Config = serde_json::from_value(config.clone()).unwrap();
+        assert_eq!(decoded.modifier_mapping, ModifierMapping::Common);
+        config["modifierMapping"] = "invalid".into();
+        assert!(serde_json::from_value::<Config>(config).is_err());
+    }
+    #[test]
+    fn receiver_registers_the_translated_video_shortcut_in_both_directions() {
+        for (source, target) in [("darwin", "win32"), ("win32", "darwin")] {
+            assert_eq!(
+                ModifierMapping::Common.receiver_shortcut("control+alt+shift+F10", source, target),
+                "super+alt+shift+F10"
+            );
+            assert_eq!(
+                ModifierMapping::Original.receiver_shortcut("control+alt+F10", source, target),
+                "control+alt+F10"
+            );
+        }
+        for system in ["darwin", "win32"] {
+            assert_eq!(
+                ModifierMapping::Common.receiver_shortcut("control+alt+F10", system, system),
+                "control+alt+F10"
+            );
+        }
+    }
     #[test]
     fn rejects_injection_and_collision() {
         let mut c = Config::default();

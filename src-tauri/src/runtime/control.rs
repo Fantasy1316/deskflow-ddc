@@ -15,6 +15,14 @@ async fn wait_identified(
     }
 }
 
+async fn wait_topology(mut ready: watch::Receiver<bool>, cancelled: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => false,
+        result = ready.wait_for(|ready| *ready) => result.is_ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +71,23 @@ mod tests {
                 .contains("识别超时")
         );
     }
+
+    #[tokio::test]
+    async fn topology_wait_resumes_after_restore_but_stop_takes_precedence() {
+        let (ready, receiver) = watch::channel(false);
+        let cancelled = CancellationToken::new();
+        let waiting = wait_topology(receiver, &cancelled);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        ready.send_replace(true);
+        assert!(waiting.await);
+        // Restoring before a loop subscribes must not lose the notification.
+        assert!(wait_topology(ready.subscribe(), &cancelled).await);
+        cancelled.cancel();
+        assert!(!wait_topology(ready.subscribe(), &cancelled).await);
+        ready.send_replace(false);
+        assert!(!wait_topology(ready.subscribe(), &cancelled).await);
+    }
 }
 
 impl Runtime {
@@ -73,6 +98,9 @@ impl Runtime {
         cancel: CancellationToken,
     ) {
         loop {
+            if !wait_topology(self.topology_ready.subscribe(), &cancel).await {
+                break;
+            }
             let result = tokio::select! {
                 _ = cancel.cancelled() => break,
                 result = listener.accept() => result,
@@ -109,6 +137,9 @@ impl Runtime {
     }
     pub(super) async fn client_loop(self: Arc<Self>, epoch: u64, cancel: CancellationToken) {
         while !cancel.is_cancelled() && self.epoch.load(Ordering::Acquire) == epoch {
+            if !wait_topology(self.topology_ready.subscribe(), &cancel).await {
+                break;
+            }
             if let Err(e) = self.discover().await {
                 self.trace("discovery.unavailable", json!({"error":e.to_string()}))
                     .await;
@@ -193,6 +224,10 @@ impl Runtime {
         source: &str,
         cancel: CancellationToken,
     ) -> Result<()> {
+        ensure!(
+            *self.topology_ready.borrow(),
+            "独立屏幕暂不可用，等待恢复后自动重连"
+        );
         let address = socket.peer_addr()?.ip();
         let key = {
             let i = self.inner.lock().await;
@@ -400,6 +435,7 @@ impl Runtime {
                 fingerprint: peer.fingerprint.clone(),
                 input_configured: true,
                 retained_display: peer.retained_display,
+                modifier_mapping: peer.modifier_mapping,
             });
             i.state.session_layout = Some(if c_role(&i.state.config) {
                 Layout {

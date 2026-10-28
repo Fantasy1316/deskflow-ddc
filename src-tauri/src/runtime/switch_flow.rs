@@ -42,6 +42,18 @@ impl Runtime {
                 .map(|_| ())
         };
         ensure!(self.current(link), "共享会话已结束");
+        self.trace(
+            "display.writeCompleted",
+            json!({
+                "source": source,
+                "target": target,
+                "transport": if source == &s.device_id { "local" } else { "remote" },
+                "commandAccepted": result.is_ok(),
+                "pictureVerified": false,
+                "error": result.as_ref().err().map(|e| e.to_string()),
+            }),
+        )
+        .await;
         let mut i = self.inner.lock().await;
         ensure!(self.current(link), "共享会话已结束");
         match result {

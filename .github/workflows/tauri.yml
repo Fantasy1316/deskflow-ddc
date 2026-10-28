@@ -54,6 +54,8 @@ jobs:
       - run: pnpm test
       - if: runner.os == 'macOS'
         run: pnpm test:native
+      - if: runner.os == 'Windows'
+        run: node scripts/test-windows-native.mjs
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test bundled_runtime -- --ignored
       - run: pnpm build:tauri --bundles ${{ matrix.bundle }}

@@ -19,6 +19,19 @@ describe('desktop frontend configuration', () => {
     expect(defaultConfig('second').fallbackIps).toEqual([])
   })
 
+  it('keeps legacy modifiers unchanged and accepts only supported mapping modes', () => {
+    const config = defaultConfig('desktop')
+    const { modifierMapping: _, ...legacy } = config
+    expect(config.modifierMapping).toBe('original')
+    expect(configSchema.parse(legacy).modifierMapping).toBe('original')
+    const action = actionSchema.parse({
+      type: 'save',
+      config: { ...config, modifierMapping: 'common' },
+    })
+    expect(action.type === 'save' && action.config.modifierMapping).toBe('common')
+    expect(configSchema.safeParse({ ...config, modifierMapping: 'invalid' }).success).toBe(false)
+  })
+
   it('rejects conflicting ports and identical video inputs', () => {
     const config = defaultConfig('desktop')
     expect(configSchema.safeParse({ ...config, controlPort: config.deskflowPort }).success).toBe(

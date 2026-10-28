@@ -1,5 +1,6 @@
 export type Role = 'host' | 'client'
 export type ScreenSide = 'left' | 'right' | 'top' | 'bottom'
+export type ModifierMapping = 'original' | 'common'
 export interface Config {
   deviceName: string
   role: Role
@@ -12,6 +13,7 @@ export interface Config {
   localInput: number | null
   peerInput: number | null
   shortcut: string
+  modifierMapping: ModifierMapping
   clipboard: boolean
   clipboardMegabytes: number
   layoutSide: 'off' | ScreenSide
@@ -41,6 +43,7 @@ export interface Peer {
   fingerprint: string
   inputConfigured: boolean
   retainedDisplay?: boolean
+  modifierMapping: ModifierMapping
 }
 export interface LogEntry {
   id: number

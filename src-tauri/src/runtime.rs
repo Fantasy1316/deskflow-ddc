@@ -7,7 +7,7 @@ use crate::{
     diagnostics::Diagnostics,
     discovery::{self, Device, Discovery},
     engine::{self, Engine},
-    model::{platform, Config, Identity, Pin},
+    model::{platform, Config, Identity, ModifierMapping, Pin},
     platform::Platform,
     pointer::{self, Panel, Point},
     protocol::{self, Wire},
@@ -46,6 +46,7 @@ pub struct Peer {
     pub fingerprint: String,
     pub input_configured: bool,
     pub retained_display: bool,
+    pub modifier_mapping: ModifierMapping,
 }
 #[derive(Clone, Serialize)]
 pub struct Log {
@@ -130,8 +131,8 @@ impl Snapshot {
     fn control_connected(&mut self, host: String) {
         self.connected = true;
         self.active_device_id = Some(host.clone());
-        // Only the first connection after an explicit start assumes the host picture.
-        // Recreating the input engine does not change the monitor's physical input.
+        // Only an unknown initial picture assumes the host picture. Stopping or
+        // recreating the input engine does not change the monitor's physical input.
         if self.display_status == "uninitialized"
             && self.display_device_id.is_none()
             && self.last_display_device_id.is_none()
@@ -206,6 +207,7 @@ pub struct Runtime {
     network: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
     pointer_busy: AtomicBool,
     topology_busy: AtomicBool,
+    topology_ready: watch::Sender<bool>,
     link: Mutex<Option<Arc<Link>>>,
     engine: Mutex<Option<Engine>>,
     pub actions: Mutex<()>,
@@ -248,6 +250,7 @@ impl Runtime {
             network: Mutex::new(None),
             pointer_busy: AtomicBool::new(false),
             topology_busy: AtomicBool::new(false),
+            topology_ready: watch::channel(true).0,
             link: Mutex::new(None),
             engine: Mutex::new(None),
             actions: Mutex::new(()),
@@ -277,10 +280,7 @@ impl Runtime {
             runtime.log("error", &format!("启动检查：{error}")).await;
         }
         runtime
-            .log(
-                "info",
-                "0.2 使用独立配置与身份；开始共享前请先停止旧版或独立 Deskflow 的共享。",
-            )
+            .log("info", "开始共享前请先停止旧版或独立 Deskflow 的共享。")
             .await;
         let this = runtime.clone();
         tokio::spawn(async move {
@@ -463,6 +463,7 @@ impl Runtime {
         self.epoch.load(Ordering::Acquire) == link.epoch
             && self.active_session.load(Ordering::Acquire) == link.id
             && !link.session.closed.is_cancelled()
+            && *self.topology_ready.borrow()
     }
     async fn identity(&self) -> Result<Identity> {
         let i = self.inner.lock().await;
@@ -478,6 +479,7 @@ impl Runtime {
             local_input: c.local_input.unwrap(),
             peer_input: c.peer_input.unwrap(),
             shortcut: c.shortcut.clone(),
+            modifier_mapping: c.modifier_mapping,
             clipboard: c.clipboard,
             clipboard_megabytes: c.clipboard_megabytes,
             deskflow_port: c.deskflow_port,
@@ -513,7 +515,12 @@ impl Runtime {
         ensure!(
             c.retained_display_id.is_empty()
                 || pointer::selected(&state.cursor_displays, &c.retained_display_id).is_some(),
-            "所选独立屏幕已断开，请重新选择"
+            "{}",
+            if platform() == "win32" && c.retained_display_id.bytes().all(|b| b.is_ascii_digit()) {
+                "旧版 Windows 独立屏幕设置使用临时句柄，请在共享设置中重新选择独立屏幕并保存"
+            } else {
+                "所选独立屏幕已断开，请重新选择"
+            }
         );
         if c.role == "client" {
             let mut i = self.inner.lock().await;
@@ -548,10 +555,16 @@ impl Runtime {
             None
         };
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.topology_ready.send_replace(true);
         let cancel = CancellationToken::new();
 
         {
             let mut i = self.inner.lock().await;
+            // Explicit restart remains the recovery path after the user manually
+            // restores the provider picture. A known source must survive stop/start.
+            if i.state.display_status == "uncertain" {
+                i.state.reset_display();
+            }
             i.state.running = true;
             i.state.listening = listener.is_some();
             i.state.last_error = None;
@@ -591,7 +604,11 @@ impl Runtime {
         self.log(
             "info",
             if c.role == "host" {
-                "等待另一台电脑连接；请保持提供端画面可见"
+                if state.display_device_id.is_some() && state.display_status != "uncertain" {
+                    "等待另一台电脑连接；保留停止前的外接屏画面来源"
+                } else {
+                    "等待另一台电脑连接；请保持提供端画面可见"
+                }
             } else {
                 "正在解析提供端地址并尝试连接"
             },
@@ -612,6 +629,7 @@ impl Runtime {
             link.session.close();
         }
         self.active_session.store(0, Ordering::Release);
+        self.topology_ready.send_replace(true);
         if let Some((_, task)) = network {
             task.await.context("等待网络监听退出失败")?;
         }
@@ -641,13 +659,10 @@ impl Runtime {
         self.platform.close().await;
         {
             let mut i = self.inner.lock().await;
-            i.state.engine = "stopped".into();
-            i.state.peer = None;
-            i.state.session_layout = None;
-            i.state.active_device_id = None;
-            i.state.reset_display();
-            i.state.switching = false;
-            i.state.connection = None;
+            // No input-source command is sent by stop(). Preserve its last
+            // known source so the next switch uses the currently visible side.
+            // An interrupted switch stays uncertain until explicit recovery.
+            i.state.control_disconnected();
         }
         self.command_pending.store(false, Ordering::Release);
         self.keyboard_pending.store(0, Ordering::Release);
@@ -700,7 +715,10 @@ impl Runtime {
                 .peer
                 .borrow()
                 .as_ref()
-                .map(|p| p.shortcut.clone())
+                .map(|p| {
+                    p.modifier_mapping
+                        .receiver_shortcut(&p.shortcut, &p.platform, platform())
+                })
         }
     }
 }
@@ -860,6 +878,7 @@ mod tests {
             local_input: 1,
             peer_input: 17,
             shortcut: "control+alt+F10".into(),
+            modifier_mapping: ModifierMapping::Original,
             clipboard: true,
             clipboard_megabytes: 4,
             deskflow_port: 24801,

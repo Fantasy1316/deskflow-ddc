@@ -114,6 +114,25 @@ pub fn server_config(c: &Config, local: &str, peer: &str, peer_retained: bool) -
     text += "end\n";
     Ok(text)
 }
+fn computer_settings(c: &Config, local: &str, peer: &Identity, local_platform: &str) -> String {
+    let (host, client, mode) = if c.role == "host" {
+        (local.to_owned(), peer.id.to_string(), c.modifier_mapping)
+    } else {
+        (peer.id.to_string(), local.to_owned(), peer.modifier_mapping)
+    };
+    let (control, super_key) = if mode.swaps_between(local_platform, &peer.platform) {
+        ("super", "ctrl")
+    } else {
+        ("ctrl", "super")
+    };
+    // Deskflow 1.27 reads per-computer modifiers from its general settings,
+    // not the legacy `section: screens`. Only the receiver is remapped; the
+    // provider's local keys and server-side switch shortcuts stay unchanged.
+    format!(
+        "[computer_sb-{host}]\nname=sb-{host}\n\n\
+         [computer_sb-{client}]\nname=sb-{client}\nmodifierCtrl={control}\nmodifierSuper={super_key}\n"
+    )
+}
 pub fn prepare(
     c: &Config,
     local: &str,
@@ -142,12 +161,8 @@ pub fn prepare(
         &root.join("server.conf"),
         server_config(c, local, &peer.id.to_string(), peer.retained_display)?.as_bytes(),
     )?;
-    let (host, client) = if c.role == "host" {
-        (local.to_string(), peer.id.to_string())
-    } else {
-        (peer.id.to_string(), local.to_string())
-    };
-    let text=format!("[core]\ncomputerName=sb-{local}\ncoreMode={}\nprocessMode=0\nport={}\ninterface=\npreventSleep=false\n\n[security]\ntlsEnabled=true\ncheckPeerFingerprints=true\ncertificate={}\n\n[client]\nremoteHost={}\n\n[server]\nexternalConfig=true\nexternalConfigFile={}\nenableClipboard={}\nclipboardSize={}\n\n[log]\nlevel=INFO\ntoFile=false\n\n[computer_sb-{host}]\nname=sb-{host}\n\n[computer_sb-{client}]\nname=sb-{client}\n",if c.role=="host"{2}else{1},c.deskflow_port,ini(&tls.join("identity.pem").to_string_lossy()),ini(address),ini(&root.join("server.conf").to_string_lossy()),c.clipboard,c.clipboard_megabytes);
+    let mut text=format!("[core]\ncomputerName=sb-{local}\ncoreMode={}\nprocessMode=0\nport={}\ninterface=\npreventSleep=false\n\n[security]\ntlsEnabled=true\ncheckPeerFingerprints=true\ncertificate={}\n\n[client]\nremoteHost={}\n\n[server]\nexternalConfig=true\nexternalConfigFile={}\nenableClipboard={}\nclipboardSize={}\n\n[log]\nlevel=INFO\ntoFile=false\n\n",if c.role=="host"{2}else{1},c.deskflow_port,ini(&tls.join("identity.pem").to_string_lossy()),ini(address),ini(&root.join("server.conf").to_string_lossy()),c.clipboard,c.clipboard_megabytes);
+    text += &computer_settings(c, local, peer, crate::model::platform());
     let settings = root.join("Deskflow.conf");
     atomic_write(&settings, text.as_bytes())?;
     Ok(settings)
@@ -391,6 +406,134 @@ async fn stop_child(child: &mut Child) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ModifierMapping;
+
+    fn peer() -> Identity {
+        Identity {
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            id: uuid::Uuid::new_v4(),
+            name: "Receiver".into(),
+            platform: "win32".into(),
+            fingerprint: "a".repeat(64),
+            role: "client".into(),
+            local_input: 1,
+            peer_input: 17,
+            shortcut: "control+alt+F10".into(),
+            modifier_mapping: ModifierMapping::Original,
+            clipboard: true,
+            clipboard_megabytes: 4,
+            deskflow_port: 24801,
+            layout_version: 1,
+            layout_side: "left".into(),
+            cross_screen_video: "manual".into(),
+            retained_display: false,
+        }
+    }
+
+    fn ini_sections(
+        text: &str,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+        let mut sections =
+            std::collections::BTreeMap::<String, std::collections::BTreeMap<String, String>>::new();
+        let mut section = String::new();
+        for line in text.lines() {
+            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section = name.into();
+            } else if let Some((key, value)) = line.split_once('=') {
+                sections
+                    .entry(section.clone())
+                    .or_default()
+                    .insert(key.into(), value.into());
+            }
+        }
+        sections
+    }
+
+    #[test]
+    fn modifier_mapping_is_host_owned_and_only_changes_cross_system_receiver() {
+        let local = uuid::Uuid::new_v4().to_string();
+        for role in ["host", "client"] {
+            for local_platform in ["darwin", "win32"] {
+                for remote_platform in ["darwin", "win32"] {
+                    for mode in [ModifierMapping::Original, ModifierMapping::Common] {
+                        let other = if mode == ModifierMapping::Common {
+                            ModifierMapping::Original
+                        } else {
+                            ModifierMapping::Common
+                        };
+                        let c = Config {
+                            role: role.into(),
+                            modifier_mapping: if role == "host" { mode } else { other },
+                            ..Config::default()
+                        };
+                        let mut remote = peer();
+                        remote.platform = remote_platform.into();
+                        remote.modifier_mapping = if role == "host" { other } else { mode };
+                        let sections =
+                            ini_sections(&computer_settings(&c, &local, &remote, local_platform));
+                        let (host, client) = if role == "host" {
+                            (local.clone(), remote.id.to_string())
+                        } else {
+                            (remote.id.to_string(), local.clone())
+                        };
+                        let host = &sections[&format!("computer_sb-{host}")];
+                        assert_eq!(host.len(), 1); // Local keys are never remapped.
+                        let client = &sections[&format!("computer_sb-{client}")];
+                        let swapped =
+                            mode == ModifierMapping::Common && local_platform != remote_platform;
+                        assert_eq!(
+                            client["modifierCtrl"],
+                            if swapped { "super" } else { "ctrl" }
+                        );
+                        assert_eq!(
+                            client["modifierSuper"],
+                            if swapped { "ctrl" } else { "super" }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preparing_session_persists_mapping_and_can_restore_original_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        identity(directory.path()).unwrap();
+        let local = uuid::Uuid::new_v4().to_string();
+        let mut peer = peer();
+        peer.platform = if crate::model::platform() == "darwin" {
+            "win32"
+        } else {
+            "darwin"
+        }
+        .into();
+        let mut c = Config {
+            display_id: "monitor".into(),
+            local_input: Some(17),
+            peer_input: Some(1),
+            modifier_mapping: ModifierMapping::Common,
+            ..Config::default()
+        };
+        for (mode, expected) in [
+            (ModifierMapping::Common, "super"),
+            (ModifierMapping::Original, "ctrl"),
+        ] {
+            c.modifier_mapping = mode;
+            let path = prepare(&c, &local, &peer, directory.path(), "127.0.0.1").unwrap();
+            let sections = ini_sections(&std::fs::read_to_string(path).unwrap());
+            assert_eq!(
+                sections[&format!("computer_sb-{}", peer.id)]["modifierCtrl"],
+                expected
+            );
+            // Mapping never rewrites the provider's switching or escape hotkeys.
+            let rules =
+                std::fs::read_to_string(directory.path().join("deskflow/server.conf")).unwrap();
+            assert_eq!(
+                rules,
+                server_config(&c, &local, &peer.id.to_string(), peer.retained_display).unwrap()
+            );
+        }
+    }
     #[test]
     fn stable_namespace_and_distinct_profile() {
         assert_eq!(namespace(Path::new("/a")), namespace(Path::new("/a")));
