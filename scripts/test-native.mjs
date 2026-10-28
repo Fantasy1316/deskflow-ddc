@@ -15,3 +15,20 @@ execFileSync(
   { stdio: 'inherit' },
 )
 execFileSync('.native-cache/test-ddc', [], { stdio: 'inherit' })
+if (process.platform === 'darwin') {
+  execFileSync(
+    'clang',
+    [
+      '-fobjc-arc',
+      '-Wall',
+      '-Wextra',
+      '-framework',
+      'AppKit',
+      'native/tests/mac-lifecycle.m',
+      '-o',
+      '.native-cache/test-mac-lifecycle',
+    ],
+    { stdio: 'inherit' },
+  )
+  execFileSync('.native-cache/test-mac-lifecycle', [], { stdio: 'inherit' })
+}

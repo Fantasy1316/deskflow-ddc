@@ -37,7 +37,9 @@ const time = (value: string) =>
           }}
         </p>
         <p>包含设备名和局域网地址；不收集键鼠操作或剪贴板内容，配对码与私钥会过滤。</p>
-        <p v-if="storageError" class="storage-error" role="alert">{{ storageError }}</p>
+        <p v-if="storageError" class="storage-error copyable-text" role="alert">
+          {{ storageError }}
+        </p>
       </div>
       <div class="log-actions">
         <button
@@ -65,7 +67,7 @@ const time = (value: string) =>
               :name="log.level === 'error' ? 'alert' : log.level === 'success' ? 'check' : 'clock'"
               :size="18"
           /></span>
-          <p>{{ log.message }}</p>
+          <p class="copyable-text">{{ log.message }}</p>
           <time :datetime="log.time">{{ time(log.time) }}</time>
         </li>
       </ol>

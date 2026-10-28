@@ -25,6 +25,16 @@
 body {
   margin: 0;
   overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+[contenteditable=''],
+[contenteditable='true'],
+.copyable-text {
+  -webkit-user-select: text;
+  user-select: text;
 }
 button,
 input,

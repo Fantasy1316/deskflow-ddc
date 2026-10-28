@@ -120,9 +120,9 @@ const valid = computed(
         ><div class="pairing-details">
           <div class="connection-address">
             <span class="field-label">本机主机名</span
-            ><strong>{{ state.hostname || '暂未获取' }}</strong
+            ><strong class="copyable-text">{{ state.hostname || '暂未获取' }}</strong
             ><span class="field-label">备用 IP</span
-            ><strong>{{ state.addresses.join(' / ') || '暂未获取' }}</strong
+            ><strong class="copyable-text">{{ state.addresses.join(' / ') || '暂未获取' }}</strong
             ><small
               >控制端口 {{ state.config.controlPort }} · 键鼠端口
               {{ state.config.deskflowPort }}</small
@@ -130,7 +130,7 @@ const valid = computed(
           </div>
           <div class="pairing-secret">
             <span class="field-label">配对码</span
-            ><code>{{
+            ><code :class="{ 'copyable-text': showCode && !state.preview }">{{
               state.preview
                 ? '请在桌面 App 中生成'
                 : showCode

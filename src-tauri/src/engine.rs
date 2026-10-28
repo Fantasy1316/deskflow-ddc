@@ -229,6 +229,7 @@ pub async fn assert_no_running_engine(dir: &Path) -> Result<()> {
 }
 pub struct Engine {
     pid: u32,
+    guardian_pid: Option<u32>,
     stop: mpsc::Sender<oneshot::Sender<Result<()>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -274,6 +275,24 @@ impl Engine {
         command.creation_flags(0x08000000);
         let mut child = command.spawn().context("无法启动内置键鼠引擎")?;
         let pid = child.id().context("无法获取键鼠引擎进程 ID")?;
+        #[cfg(target_os = "macos")]
+        let mut guardian = {
+            let result = async {
+                crate::engine_guard::Guardian::start(&mut child, &std::env::current_exe()?).await
+            }
+            .await;
+            match result {
+                Ok(guardian) => guardian,
+                Err(error) => {
+                    child.kill().await.context("退出保护失败且无法结束引擎")?;
+                    return Err(error);
+                }
+            }
+        };
+        #[cfg(target_os = "macos")]
+        let guardian_pid = guardian.pid();
+        #[cfg(not(target_os = "macos"))]
+        let guardian_pid = None;
         for pipe in [
             child
                 .stdout
@@ -351,8 +370,18 @@ impl Engine {
         });
         let (stop, mut rx) = mpsc::channel::<oneshot::Sender<Result<()>>>(1);
         let task = tokio::spawn(async move {
+            let guard_failed = async {
+                #[cfg(target_os = "macos")]
+                let _ = guardian.wait().await;
+                #[cfg(not(target_os = "macos"))]
+                std::future::pending::<()>().await;
+            };
             let reason = tokio::select! {
              result=child.wait()=>format!("{result:?}"),
+             _=guard_failed=>{
+              let _=stop_child(&mut child).await;
+              "引擎退出保护意外结束，已停止共享".to_string()
+             },
              request=rx.recv()=>{
               let _=ipc_stop.send(()).await;
               let result=stop_child(&mut child).await;
@@ -362,12 +391,26 @@ impl Engine {
              }
             };
             ipc_task.abort();
-            let _ = events.send(Event::Exited(reason)).await;
+            #[cfg(target_os = "macos")]
+            guardian.finish().await;
+            // Deliver the exit event even under backpressure, independently of
+            // the completed child/guardian cleanup awaited by application quit.
+            tokio::spawn(async move {
+                let _ = events.send(Event::Exited(reason)).await;
+            });
         });
-        Ok(Self { pid, stop, task })
+        Ok(Self {
+            pid,
+            guardian_pid,
+            stop,
+            task,
+        })
     }
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+    pub fn guardian_pid(&self) -> Option<u32> {
+        self.guardian_pid
     }
     pub async fn stop(&mut self) -> Result<()> {
         if self.task.is_finished() {
@@ -379,6 +422,7 @@ impl Engine {
             return Ok(());
         }
         rx.await.context("等待键鼠引擎退出失败")??;
+        (&mut self.task).await.context("等待引擎退出保护回收失败")?;
         Ok(())
     }
 }

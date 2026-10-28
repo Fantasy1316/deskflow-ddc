@@ -275,6 +275,73 @@ mod tests {
         attach_with_requests(runtime).await.0
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn standalone_input_tests_replace_retained_routing_in_both_roles() {
+        use std::os::unix::fs::PermissionsExt;
+        for role in ["host", "client"] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = fixture(directory.path(), role);
+            runtime.stop().await.unwrap();
+            let peer = uuid::Uuid::new_v4();
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.config.display_id = "test-display".into();
+                i.state.config.local_input = Some(17);
+                i.state.config.peer_input = Some(1);
+                i.store.value.trusted_peer = Some(Pin {
+                    id: peer,
+                    fingerprint: "a".repeat(64),
+                });
+            }
+            let helper = runtime.platform.resources.join("native/bin/m1ddc");
+            std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            // The stopped session's peer field is empty; use the saved peer pin.
+            assert!(runtime.snapshot().await.peer.is_none());
+            runtime.test_input(1).await.unwrap();
+            let s = runtime.snapshot().await;
+            assert_eq!(s.display_device_id, Some(peer.to_string()));
+            assert_eq!(s.last_display_device_id, s.display_device_id);
+            assert_eq!(s.display_status, "commanded");
+            runtime.test_input(17).await.unwrap();
+            let s = runtime.snapshot().await;
+            assert_eq!(s.display_device_id.as_ref(), Some(&s.device_id));
+            assert_eq!(s.last_display_device_id, s.display_device_id);
+
+            // Even an error may follow a physical switch. Do not route via the
+            // retained local source on the next session.
+            std::fs::write(&helper, "#!/bin/sh\nexit 1\n").unwrap();
+            assert!(runtime.test_input(1).await.is_err());
+            let s = runtime.snapshot().await;
+            assert!(s.display_device_id.is_none());
+            assert_eq!(s.display_status, "uncertain");
+            assert_eq!(s.last_display_device_id.as_ref(), Some(&s.device_id));
+
+            // Successful test before pairing cannot invent a receiver UUID.
+            std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
+            runtime.inner.lock().await.store.value.trusted_peer = None;
+            runtime.test_input(1).await.unwrap();
+            let s = runtime.snapshot().await;
+            assert!(s.display_device_id.is_none());
+            assert_eq!(s.display_status, "uncertain");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_pairing_replacement_preserves_retained_source_and_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        let mut i = runtime.inner.lock().await;
+        let code = i.store.pairing.clone();
+        assert!(i.replace_pairing("invalid-code".into()).is_err());
+        assert_eq!(i.store.pairing, code);
+        assert_eq!(i.state.pairing_code, code);
+        assert_eq!(i.state.display_device_id.as_deref(), Some("receiver"));
+    }
+
     #[tokio::test]
     async fn stop_restart_keeps_receiver_picture_and_routes_return_command_through_receiver() {
         let directory = tempfile::tempdir().unwrap();

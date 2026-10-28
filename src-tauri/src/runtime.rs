@@ -161,6 +161,12 @@ impl Snapshot {
         self.last_display_device_id = None;
         self.display_status = "uninitialized".into();
     }
+    fn pairing_changed(&mut self, code: String) {
+        self.pairing_code = code;
+        self.has_saved_pairing = false;
+        // Source IDs belong to the previous pairing, not to a future peer.
+        self.reset_display();
+    }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +181,15 @@ struct Inner {
     diagnostics: Diagnostics,
     sequence: u64,
     diagnostic_line: Option<(String, u64, std::time::Instant)>,
+}
+impl Inner {
+    fn replace_pairing(&mut self, code: String) -> Result<()> {
+        // Invalidate routing only after credentials/settings were committed.
+        self.store.set_pairing(code.clone())?;
+        self.diagnostics.protect(code.clone());
+        self.state.pairing_changed(code);
+        Ok(())
+    }
 }
 struct Link {
     id: u64,
@@ -436,7 +451,8 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         ensure!(!i.state.running, "请先停止共享");
         i.store.import_legacy_config(&file)?;
-        i.state.has_saved_pairing = false;
+        let code = i.store.pairing.clone();
+        i.state.pairing_changed(code);
         i.state.config = i.store.value.config.clone();
         self.publish();
         drop(i);
@@ -452,10 +468,7 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         ensure!(!i.state.running, "请先停止共享");
         let code = protocol::new_pairing();
-        i.store.set_pairing(code.clone())?;
-        i.diagnostics.protect(code.clone());
-        i.state.pairing_code = code;
-        i.state.has_saved_pairing = false;
+        i.replace_pairing(code)?;
         self.publish();
         Ok(())
     }
@@ -538,8 +551,7 @@ impl Runtime {
                 "请选择发现的电脑，或填写主机名和备用 IP"
             );
             if code.trim() != i.store.pairing {
-                i.store.set_pairing(code.trim().into())?;
-                i.diagnostics.protect(code.trim().into());
+                i.replace_pairing(code.trim().into())?;
             }
             i.state.pairing_code = i.store.pairing.clone();
             i.state.has_saved_pairing = i.store.value.trusted_peer.is_some();
@@ -837,6 +849,25 @@ mod tests {
         assert_eq!(s.display_device_id.as_deref(), Some("receiver"));
         assert_eq!(s.last_display_device_id.as_deref(), Some("receiver"));
         assert_eq!(s.display_status, "commanded");
+    }
+    #[test]
+    fn replacing_pairing_discards_old_picture_ids_before_connecting_new_peer() {
+        for source in ["old-peer", "provider"] {
+            let mut s = snapshot();
+            s.display_device_id = Some(source.into());
+            s.last_display_device_id = Some(source.into());
+            s.display_status = "commanded".into();
+            let code = protocol::new_pairing();
+            s.pairing_changed(code.clone());
+            assert_eq!(s.pairing_code, code);
+            assert!(!s.has_saved_pairing);
+            assert!(s.display_device_id.is_none());
+            assert!(s.last_display_device_id.is_none());
+            assert_eq!(s.display_status, "uninitialized");
+            s.control_connected("new-provider".into());
+            assert_eq!(s.display_device_id.as_deref(), Some("new-provider"));
+            assert_eq!(s.last_display_device_id, s.display_device_id);
+        }
     }
     #[test]
     fn reconnect_preserves_uncertainty_until_explicit_restart() {

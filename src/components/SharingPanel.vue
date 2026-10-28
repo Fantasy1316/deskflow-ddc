@@ -182,7 +182,9 @@ const label = (value: string) =>
       <div class="dependency-row">
         <div>
           <strong>键鼠与剪贴板引擎</strong>
-          <p>{{ state.config.deskflowPath || '使用内置 Deskflow 1.27.0（离线可用）' }}</p>
+          <p :class="{ 'copyable-text': !!state.config.deskflowPath }">
+            {{ state.config.deskflowPath || '使用内置 Deskflow 1.27.0（离线可用）' }}
+          </p>
         </div>
         <span :class="['badge', state.dependencies.deskflow ? 'success' : 'neutral']">{{
           state.dependencies.deskflow

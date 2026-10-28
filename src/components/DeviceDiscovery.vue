@@ -29,7 +29,9 @@ const emit = defineEmits<{ refresh: []; select: [device: DiscoveredDevice] }>()
     >
       <span
         ><strong>{{ device.name }}</strong
-        ><small>{{ device.hostname }} · {{ device.addresses.join(' / ') }}</small></span
+        ><small class="copyable-text"
+          >{{ device.hostname }} · {{ device.addresses.join(' / ') }}</small
+        ></span
       >
       <span>选择</span>
     </button>

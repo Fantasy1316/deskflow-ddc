@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -21,6 +21,53 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
+
+#[derive(Default)]
+struct ExitState(AtomicU8);
+impl ExitState {
+    fn begin(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+    fn ready(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 2
+    }
+    fn complete(&self) {
+        self.0.store(2, Ordering::Release);
+    }
+    fn retry(&self) {
+        self.0.store(0, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "macos")]
+static DOCK_QUIT_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn install_dock_quit(app: &tauri::AppHandle) -> Result<()> {
+    unsafe extern "C" {
+        fn sb_install_quit_handler(callback: extern "C" fn()) -> bool;
+    }
+    extern "C" fn request() {
+        if let Some(app) = DOCK_QUIT_APP.get() {
+            if app.state::<ExitState>().ready() {
+                finish_quit(app, true);
+            } else {
+                quit_from(app, "macosTermination");
+            }
+        }
+    }
+    ensure!(DOCK_QUIT_APP.set(app.clone()).is_ok(), "退出处理器已注册");
+    ensure!(
+        unsafe { sb_install_quit_handler(request) },
+        "无法注册程序坞退出保护"
+    );
+    Ok(())
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -267,9 +314,7 @@ fn handle_menu(app: &tauri::AppHandle, id: &str) {
                 return;
             };
             let controls = app.state::<TrayControls>().inner().clone();
-            if app.state::<AtomicBool>().load(Ordering::Acquire)
-                || controls.busy.swap(true, Ordering::AcqRel)
-            {
+            if app.state::<ExitState>().requested() || controls.busy.swap(true, Ordering::AcqRel) {
                 return;
             }
             let app = app.clone();
@@ -278,7 +323,7 @@ fn handle_menu(app: &tauri::AppHandle, id: &str) {
                 controls.sync(&runtime.snapshot().await);
                 let _action = runtime.actions.lock().await;
                 // A quit may have started while this action was queued.
-                if !app.state::<AtomicBool>().load(Ordering::Acquire) {
+                if !app.state::<ExitState>().requested() {
                     if let Err(e) = dispatch(&app, &runtime, action).await {
                         runtime.log("error", &format!("托盘操作失败：{e}")).await;
                         show(&app);
@@ -291,24 +336,59 @@ fn handle_menu(app: &tauri::AppHandle, id: &str) {
     }
 }
 fn quit(app: &tauri::AppHandle) {
-    if app.state::<AtomicBool>().swap(true, Ordering::AcqRel) {
+    quit_from(app, "applicationMenu");
+}
+fn finish_quit(app: &tauri::AppHandle, stopped: bool) {
+    let handle = app.clone();
+    // A Dock/system quit can arrive while menu-initiated cleanup is running.
+    // Decide whether to reply to Cocoa on its main thread, after cleanup.
+    let _ = app.run_on_main_thread(move || {
+        if stopped {
+            handle.state::<ExitState>().complete();
+        }
+        #[cfg(target_os = "macos")]
+        let replied = unsafe {
+            unsafe extern "C" {
+                fn sb_complete_quit(allow: bool) -> bool;
+            }
+            sb_complete_quit(stopped)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let replied = false;
+        if stopped {
+            if !replied {
+                handle.exit(0);
+            }
+        } else {
+            handle.state::<ExitState>().retry();
+            show(&handle);
+        }
+    });
+}
+fn quit_from(app: &tauri::AppHandle, source: &'static str) {
+    if !app.state::<ExitState>().begin() {
         return;
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let runtime = app.state::<Arc<Runtime>>();
+        runtime
+            .trace("app.quitRequested", json!({"source":source}))
+            .await;
         let _action = runtime.actions.lock().await;
         match runtime.stop().await {
             Ok(()) => {
                 runtime.shutdown.cancel();
-                app.exit(0)
+                runtime
+                    .trace("app.exitReady", json!({"ownedEngineStopped":true}))
+                    .await;
+                finish_quit(&app, true);
             }
             Err(e) => {
                 runtime
                     .log("error", &format!("退出前停止引擎失败：{e}"))
                     .await;
-                app.state::<AtomicBool>().store(false, Ordering::Release);
-                show(&app);
+                finish_quit(&app, false);
             }
         }
     });
@@ -398,7 +478,9 @@ pub fn run() {
                 }
             };
             app.manage(runtime.clone());
-            app.manage(AtomicBool::new(false));
+            app.manage(ExitState::default());
+            #[cfg(target_os = "macos")]
+            install_dock_quit(app.handle())?;
             let show_item = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
             let controls = TrayControls {
@@ -485,7 +567,7 @@ pub fn run() {
                 window.on_window_event(move |event| match event {
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        if has_tray && !handle.state::<AtomicBool>().load(Ordering::Acquire) {
+                        if has_tray && !handle.state::<ExitState>().requested() {
                             if let Some(w) = handle.get_webview_window("main") {
                                 if w.hide().is_ok() {
                                     // Accessory keeps the tray and sharing alive while
@@ -523,9 +605,9 @@ pub fn run() {
         .expect("无法启动 Deskflow DDC");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
-            if !app.state::<AtomicBool>().load(Ordering::Acquire) {
+            if !app.state::<ExitState>().ready() {
                 api.prevent_exit();
-                quit(app);
+                quit_from(app, "systemExit");
             }
         }
         #[cfg(target_os = "macos")]
@@ -536,6 +618,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_exit_requests_cannot_bypass_engine_cleanup() {
+        let state = ExitState::default();
+        assert!(!state.ready());
+        assert!(state.begin());
+        for _ in 0..4 {
+            assert!(state.requested());
+            assert!(!state.begin());
+            assert!(!state.ready());
+        }
+        state.retry();
+        assert!(!state.requested());
+        assert!(state.begin());
+        state.complete();
+        assert!(state.ready());
+        assert!(!state.begin());
+    }
     #[test]
     fn rejects_unknown_actions_and_fields() {
         assert!(

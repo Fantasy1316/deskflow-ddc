@@ -33,7 +33,7 @@ impl Runtime {
         let (tx, mut rx) = mpsc::channel(64);
         let (transitions, mut changes) = mpsc::channel(32);
         let engine = Engine::start(binary.clone(), &c, &settings, &dir, tx).await?;
-        self.trace("engine.started", json!({"pid":engine.pid(),"parentPid":std::process::id(),"binary":binary,"session":link.id,"version":env!("CARGO_PKG_VERSION")})).await;
+        self.trace("engine.started", json!({"pid":engine.pid(),"guardianPid":engine.guardian_pid(),"parentPid":std::process::id(),"binary":binary,"session":link.id,"version":env!("CARGO_PKG_VERSION")})).await;
         *guard = Some(engine);
         {
             let mut i = self.inner.lock().await;

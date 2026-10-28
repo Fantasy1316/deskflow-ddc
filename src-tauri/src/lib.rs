@@ -1,6 +1,8 @@
 pub mod diagnostics;
 pub mod discovery;
 pub mod engine;
+#[cfg(target_os = "macos")]
+pub mod engine_guard;
 pub mod model;
 pub mod platform;
 pub mod pointer;

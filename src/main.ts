@@ -3,6 +3,7 @@ import App from './App.vue'
 import './style.css'
 import type { RendererError } from './shared/types'
 import { installTauriBridge } from './transport/tauri'
+window.addEventListener('contextmenu', (event) => event.preventDefault(), { capture: true })
 function reportError(error: unknown, source: RendererError['source']) {
   const detail =
     error instanceof Error
@@ -26,5 +27,8 @@ async function bootstrap() {
 }
 void bootstrap().catch((error) => {
   const root = document.getElementById('app')
-  if (root) root.textContent = `无法连接应用后端：${String(error)}`
+  if (root) {
+    root.classList.add('copyable-text')
+    root.textContent = `无法连接应用后端：${String(error)}`
+  }
 })

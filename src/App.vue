@@ -126,8 +126,9 @@ const on = computed(() => state.value.connected && state.value.engine === 'ready
       </div>
     </div>
     <div v-if="notice" :class="['toast', { error: noticeError }]" role="status">
-      <AppIcon :name="noticeError ? 'alert' : 'check'" :size="20" /><span>{{ notice }}</span
-      ><button aria-label="关闭提示" @click="notice = ''">
+      <AppIcon :name="noticeError ? 'alert' : 'check'" :size="20" />
+      <span :class="{ 'copyable-text': noticeError }">{{ notice }}</span>
+      <button aria-label="关闭提示" @click="notice = ''">
         <AppIcon name="close" :size="16" />
       </button>
     </div>

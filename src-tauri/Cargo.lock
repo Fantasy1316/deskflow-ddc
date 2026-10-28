@@ -894,6 +894,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64 0.22.1",
+ "cc",
  "chrono",
  "flate2",
  "futures-util",

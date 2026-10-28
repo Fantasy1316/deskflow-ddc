@@ -343,7 +343,31 @@ impl Runtime {
             Some(value) == s.config.local_input || Some(value) == s.config.peer_input,
             "只能测试已保存输入源"
         );
+        let target = {
+            let mut i = self.inner.lock().await;
+            let target = if Some(value) == s.config.local_input {
+                Some(s.device_id.clone())
+            } else {
+                i.store
+                    .value
+                    .trusted_peer
+                    .as_ref()
+                    .map(|p| p.id.to_string())
+            };
+            // A timed-out or cancelled call may already have changed the monitor.
+            // Never retain the previous source as a usable DDC sender.
+            i.state.display_device_id = None;
+            i.state.display_status = "uncertain".into();
+            target
+        };
+        self.publish();
         self.platform.input(&s.config.display_id, value).await?;
+        if let Some(target) = target {
+            let mut i = self.inner.lock().await;
+            i.state.display_device_id = Some(target.clone());
+            i.state.last_display_device_id = Some(target);
+            i.state.display_status = "commanded".into();
+        }
         self.log("info", "输入切换指令已发送，请以实际画面为准")
             .await;
         Ok(())
