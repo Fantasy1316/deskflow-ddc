@@ -8,6 +8,10 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('testInput'), value: z.number().int().min(0).max(65535) }).strict(),
   ...(
     [
+      'lockPeer',
+      'installWindowsService',
+      'removeWindowsService',
+      'checkWindowsService',
       'scan',
       'discover',
       'importLegacyConfig',

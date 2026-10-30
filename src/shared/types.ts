@@ -1,7 +1,9 @@
 export type Role = 'host' | 'client'
 export type ScreenSide = 'left' | 'right' | 'top' | 'bottom'
 export type ModifierMapping = 'original' | 'common'
+export type OperationMode = 'sharing' | 'display-only'
 export interface Config {
+  mode: OperationMode
   deviceName: string
   role: Role
   peerAddress: string
@@ -14,6 +16,7 @@ export interface Config {
   peerInput: number | null
   shortcut: string
   modifierMapping: ModifierMapping
+  windowsSecureInput: boolean
   clipboard: boolean
   clipboardMegabytes: number
   layoutSide: 'off' | ScreenSide
@@ -37,6 +40,8 @@ export interface Monitor {
   readable: boolean
 }
 export interface Peer {
+  fileTransfer?: boolean
+  lockControl?: boolean
   id: string
   name: string
   platform: string
@@ -61,6 +66,7 @@ export interface DiscoveredDevice {
 export interface Snapshot {
   revision?: number
   hostname?: string
+  windowsService?: { installed: boolean; current: boolean }
   engineSource?: 'bundled' | 'external'
   discoveredDevices?: DiscoveredDevice[]
   discovering?: boolean
@@ -78,6 +84,7 @@ export interface Snapshot {
   engine: 'stopped' | 'starting' | 'ready' | 'error'
   peer: Peer | null
   activeDeviceId: string | null
+  displayTarget?: 'local' | 'peer' | null
   displayDeviceId: string | null
   switching: boolean
   pairingCode: string

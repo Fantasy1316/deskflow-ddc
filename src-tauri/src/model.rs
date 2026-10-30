@@ -37,9 +37,18 @@ impl ModifierMapping {
             .join("+")
     }
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OperationMode {
+    #[default]
+    Sharing,
+    DisplayOnly,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub mode: OperationMode,
     pub device_name: String,
     pub role: String,
     pub peer_address: String,
@@ -54,6 +63,8 @@ pub struct Config {
     pub shortcut: String,
     #[serde(default)]
     pub modifier_mapping: ModifierMapping,
+    #[serde(default)]
+    pub windows_secure_input: bool,
     pub clipboard: bool,
     pub clipboard_megabytes: u8,
     pub layout_side: String,
@@ -63,6 +74,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            mode: OperationMode::Sharing,
             device_name: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -81,6 +93,7 @@ impl Default for Config {
             peer_input: None,
             shortcut: "control+alt+F10".into(),
             modifier_mapping: ModifierMapping::Original,
+            windows_secure_input: false,
             clipboard: true,
             clipboard_megabytes: 4,
             layout_side: "off".into(),
@@ -156,7 +169,9 @@ impl Config {
         );
         ensure!(platform() != "unsupported", "当前仅支持 macOS 和 Windows");
         ensure!(
-            !(platform() == "win32" && self.role == "host" && self.shortcut.ends_with("F12")),
+            !(platform() == "win32"
+                && (self.role == "host" || self.mode == OperationMode::DisplayOnly)
+                && self.shortcut.ends_with("F12")),
             "F12 是 Windows 保留键，请选择 F10 或 F9"
         );
         Ok(())
@@ -170,6 +185,10 @@ pub struct Pin {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    #[serde(default)]
+    pub file_protocol: u8,
+    #[serde(default)]
+    pub lock_control: bool,
     #[serde(default)]
     pub app_version: String,
     pub id: uuid::Uuid,
@@ -251,6 +270,26 @@ mod tests {
         assert_eq!(decoded.modifier_mapping, ModifierMapping::Common);
         config["modifierMapping"] = "invalid".into();
         assert!(serde_json::from_value::<Config>(config).is_err());
+    }
+    #[test]
+    fn old_profiles_keep_full_sharing_and_unknown_operation_modes_are_rejected() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("mode");
+        assert_eq!(
+            serde_json::from_value::<Config>(value.clone())
+                .unwrap()
+                .mode,
+            OperationMode::Sharing
+        );
+        value["mode"] = "display-only".into();
+        assert_eq!(
+            serde_json::from_value::<Config>(value.clone())
+                .unwrap()
+                .mode,
+            OperationMode::DisplayOnly
+        );
+        value["mode"] = "other".into();
+        assert!(serde_json::from_value::<Config>(value).is_err());
     }
     #[test]
     fn receiver_registers_the_translated_video_shortcut_in_both_directions() {

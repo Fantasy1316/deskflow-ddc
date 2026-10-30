@@ -17,6 +17,7 @@ export const configSchema = z.preprocess(
   },
   z
     .object({
+      mode: z.enum(['sharing', 'display-only']).default('sharing'),
       deviceName: z
         .string()
         .trim()
@@ -44,6 +45,7 @@ export const configSchema = z.preprocess(
       peerInput: z.number().int().min(0).max(65535).nullable(),
       shortcut: z.string().regex(/^(control\+alt\+(shift\+)?)(F(?:[1-9]|1[0-7]))$/),
       modifierMapping: z.enum(['original', 'common']).default('original'),
+      windowsSecureInput: z.boolean().default(false),
       clipboard: z.boolean(),
       clipboardMegabytes: z.number().int().min(1).max(32),
       layoutSide: z.enum(['off', 'left', 'right', 'top', 'bottom']).default('off'),
@@ -66,6 +68,7 @@ export const configSchema = z.preprocess(
 /** Frontend-only initial state; the desktop backend supplies persisted settings. */
 export function defaultConfig(deviceName: string): Config {
   return {
+    mode: 'sharing',
     deviceName,
     role: 'host',
     peerAddress: '',
@@ -78,6 +81,7 @@ export function defaultConfig(deviceName: string): Config {
     peerInput: null,
     shortcut: 'control+alt+F10',
     modifierMapping: 'original',
+    windowsSecureInput: false,
     clipboard: true,
     clipboardMegabytes: 4,
     layoutSide: 'off',

@@ -25,20 +25,26 @@ impl Platform {
         }
     }
     pub async fn run(&self, file: PathBuf, args: &[String]) -> Result<String> {
+        let tool = file
+            .file_name()
+            .unwrap_or(file.as_os_str())
+            .to_string_lossy();
+        let invocation = format!("{tool} {}", args.join(" ")).trim().to_owned();
         let mut cmd = Command::new(file);
         cmd.args(args).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         let output = tokio::time::timeout(Duration::from_secs(7), cmd.output())
             .await
-            .context("原生调用超时")??;
+            .with_context(|| format!("原生调用超时：{invocation}"))?
+            .map_err(|error| anyhow::anyhow!("无法启动原生工具：{invocation}；{error}"))?;
         ensure!(
             output.status.success(),
-            "原生调用失败：{}",
-            String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(700)
-                .collect::<String>()
+            "原生调用失败：{invocation}；退出状态={}；stderr={}；stdout={}",
+            output.status,
+            // m1ddc reports some I2C errors on stdout rather than stderr.
+            native_output_detail(&output.stderr),
+            native_output_detail(&output.stdout),
         );
         ensure!(output.stdout.len() <= 1024 * 1024, "原生返回数据过大");
         Ok(String::from_utf8(output.stdout)?.trim().into())
@@ -90,11 +96,19 @@ impl Platform {
             let reply: Value = serde_json::from_str(&line)?;
             ensure!(reply["id"] == id, "原生响应序号不匹配");
             if let Some(error) = reply["error"].as_str() {
-                bail!("原生调用失败：{}", error)
+                bail!(
+                    "原生调用失败：Windows 操作={action}；{}",
+                    native_output_detail(error.as_bytes())
+                )
             }
             Ok(reply["result"].clone())
         };
-        match tokio::time::timeout(Duration::from_secs(8), result).await {
+        let deadline = if action == "get" {
+            Duration::from_millis(2500)
+        } else {
+            Duration::from_secs(8)
+        };
+        match tokio::time::timeout(deadline, result).await {
             Ok(Ok(v)) => Ok(v),
             r => {
                 if let Some(mut h) = guard.take() {
@@ -106,6 +120,23 @@ impl Platform {
                 }
             }
         }
+    }
+    pub async fn lock_session(&self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            #[link(name = "user32")]
+            unsafe extern "system" {
+                fn LockWorkStation() -> i32;
+            }
+            ensure!(
+                unsafe { LockWorkStation() } != 0,
+                "Windows 未接受锁屏请求：{}",
+                std::io::Error::last_os_error()
+            );
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        bail!("仅支持锁定 Windows 接收端")
     }
     pub async fn available(&self) -> bool {
         match platform() {
@@ -186,6 +217,27 @@ impl Platform {
         }
         Ok(())
     }
+    pub async fn current_input(&self, id: &str) -> Result<Option<u16>> {
+        ensure!(
+            !id.is_empty() && !id.contains(['\n', '\r', '\0']),
+            "显示器标识无效"
+        );
+        if platform() == "win32" {
+            let value = self.win("get", serde_json::json!({"monitorId":id})).await?;
+            return Ok(value.as_u64().and_then(|v| u16::try_from(v).ok()));
+        }
+        ensure!(platform() == "darwin", "当前系统不支持 DDC");
+        let output = tokio::time::timeout(
+            Duration::from_millis(2500),
+            self.run(
+                self.resources.join("native/bin/m1ddc"),
+                &["display".into(), id.into(), "get".into(), "input".into()],
+            ),
+        )
+        .await
+        .context("读取显示器输入源超时")??;
+        Ok(parse_input(&output))
+    }
     pub async fn inject(&self, host: bool) -> Result<()> {
         let target = if host { "host" } else { "peer" };
         if platform() == "win32" {
@@ -237,6 +289,16 @@ impl Platform {
     }
 }
 
+fn native_output_detail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let detail: String = text.trim().chars().take(700).collect();
+    if detail.is_empty() {
+        "未提供输出".into()
+    } else {
+        detail
+    }
+}
+
 fn parse_mac_displays(output: &str) -> Vec<Value> {
     let regex = regex::Regex::new(r"(?m)^\[(\d+)\][ \t]*(.*?)\s*\(([A-Fa-f0-9-]{36})\)[ \t]*$")
         .expect("static display regex");
@@ -257,6 +319,64 @@ fn parse_input(output: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_failure_keeps_ddc_error_written_to_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let helper = directory.path().join("fake-ddc");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho 'I2C communication failed'\nexit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let platform = Platform::new(directory.path().into());
+        let error = platform.run(helper, &[]).await.unwrap_err();
+        assert!(error.to_string().contains("I2C communication failed"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_native_failure_keeps_tool_operation_and_exit_status() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let helper = directory.path().join("fake-ddc");
+        std::fs::write(&helper, "#!/bin/sh\nprintf '  '\nprintf '  ' >&2\nexit 7\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let platform = Platform::new(directory.path().into());
+        let args = ["display", "external", "set", "input", "17"].map(String::from);
+        let error = platform.run(helper, &args).await.unwrap_err().to_string();
+        assert!(error.contains("fake-ddc display external set input 17"));
+        assert!(error.contains("退出状态=exit status: 7"));
+        assert!(error.contains("stderr=未提供输出；stdout=未提供输出"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_failure_keeps_both_output_streams() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let helper = directory.path().join("fake-ddc");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho 'DDC bus unavailable'\necho 'helper failed' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let platform = Platform::new(directory.path().into());
+        let error = platform.run(helper, &[]).await.unwrap_err().to_string();
+        assert!(error.contains("stderr=helper failed；stdout=DDC bus unavailable"));
+    }
+    #[test]
+    fn native_error_details_are_nonempty_lossy_and_bounded() {
+        assert_eq!(native_output_detail(b" \n\t"), "未提供输出");
+        assert!(native_output_detail(&[0xff]).contains('\u{fffd}'));
+        assert_eq!(
+            native_output_detail("错".repeat(701).as_bytes())
+                .chars()
+                .count(),
+            700
+        );
+    }
     #[test]
     fn display_scan_keeps_names_and_ignores_diagnostic_lines() {
         let output = "DDC probe message\n[1] Lenovo T2224r (12345678-1234-1234-1234-123456789ABC)\n[2] Broken (not-a-uuid)\n";

@@ -60,7 +60,7 @@ impl Runtime {
                         && s.display_device_id.as_deref() == s.peer.as_ref().map(|p| p.id.as_str())
                         && !this.command_pending.load(Ordering::Acquire);
                     (
-                        s.running,
+                        s.running && s.config.mode == OperationMode::Sharing,
                         if enabled {
                             pointer::selected(&s.cursor_displays, &s.config.retained_display_id)
                                 .map(|panel| (panel.clone(), local_side(s).to_owned()))
@@ -126,6 +126,7 @@ impl Runtime {
         }
         let mut i = self.inner.lock().await;
         let missing = i.state.running
+            && i.state.config.mode == OperationMode::Sharing
             && !i.state.config.retained_display_id.is_empty()
             && pointer::selected(&panels, &i.state.config.retained_display_id).is_none();
         if i.state.cursor_displays != panels {
@@ -172,10 +173,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn fixture(directory: &std::path::Path, role: &str) -> Arc<Runtime> {
+    pub(in crate::runtime) fn fixture(directory: &std::path::Path, role: &str) -> Arc<Runtime> {
         let store = Store {
             directory: directory.into(),
             value: crate::store::Stored {
@@ -201,6 +202,7 @@ mod tests {
         state.display_status = "commanded".into();
         state.cursor_displays = panels();
         Arc::new(Runtime {
+            transfers: crate::transfer::Manager::new(directory.join("transfers")).unwrap(),
             updates: watch::channel(state.clone()).0,
             inner: Mutex::new(Inner {
                 store,
@@ -263,6 +265,7 @@ mod tests {
         let (local, _incoming) = Session::spawn(server.await.unwrap());
         let (remote, incoming) = Session::spawn(client);
         *runtime.link.lock().await = Some(Arc::new(Link {
+            address: "127.0.0.1".parse().unwrap(),
             epoch: runtime.epoch.load(Ordering::Acquire),
             id: runtime.active_session.load(Ordering::Acquire),
             session: local,
@@ -343,6 +346,395 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn declining_received_offer_notifies_original_sender_over_control_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let send_dir = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        let local = uuid::Uuid::parse_str(&runtime.snapshot().await.device_id).unwrap();
+        let peer = super::super::tests::peer();
+        let sender = crate::transfer::Manager::new(send_dir.path().into()).unwrap();
+        let file = source.path().join("archive.zip");
+        std::fs::write(&file, [1, 2, 3]).unwrap();
+        let id = sender
+            .prepare(vec![file], local, "receiver".into())
+            .await
+            .unwrap();
+        let invite = sender
+            .offer(id, local, "127.0.0.1".parse().unwrap())
+            .await
+            .unwrap();
+        let port = invite.port;
+        runtime
+            .transfers
+            .incoming(
+                invite,
+                "127.0.0.1".parse().unwrap(),
+                peer.id,
+                "sender".into(),
+            )
+            .unwrap();
+        let (remote, mut requests) = attach_with_requests(&runtime).await;
+        runtime
+            .link
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .peer
+            .send_replace(Some(peer));
+        let sending = sender.clone();
+        let handler = tokio::spawn(async move {
+            let Incoming::Request {
+                id: request,
+                method,
+                payload,
+            } = requests.recv().await.unwrap()
+            else {
+                panic!("Expected cancellation RPC")
+            };
+            assert_eq!(method, "file-cancel");
+            assert_eq!(payload, json!(id));
+            sending.cancel_from_peer(id, local).await.unwrap();
+            remote.reply(request, Ok(json!(true))).await.unwrap();
+            remote
+        });
+        runtime.cancel_transfer(id).await.unwrap();
+        let remote = handler.await.unwrap();
+        assert_eq!(sender.snapshot()[0].status, "cancelled");
+        assert_eq!(runtime.transfers.snapshot()[0].status, "cancelled");
+        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        remote.close();
+        sender.shutdown().await;
+        runtime.transfers.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn queued_transition_acknowledges_command_and_serializes_owner_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        let local = runtime.snapshot().await.device_id;
+        {
+            let mut i = runtime.inner.lock().await;
+            i.state.engine = "ready".into();
+            i.state.active_device_id = Some("receiver".into());
+            i.state.peer = Some(Peer {
+                id: "receiver".into(),
+                name: "Receiver".into(),
+                platform: "win32".into(),
+                fingerprint: "a".repeat(64),
+                file_transfer: false,
+                lock_control: false,
+                input_configured: true,
+                retained_display: false,
+                modifier_mapping: ModifierMapping::Original,
+            });
+        }
+        let remote = attach(&runtime).await;
+        let link = runtime.link.lock().await.clone().unwrap();
+        let mut completed = runtime.completed.subscribe();
+        runtime
+            .observe_transition(
+                &link,
+                Transition {
+                    from: local.clone(),
+                    to: "receiver".into(),
+                },
+            )
+            .await;
+        let ack = tokio::time::timeout(Duration::from_millis(100), completed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack.to, "receiver");
+        assert!(ack.error.is_none());
+        runtime.inner.lock().await.state.active_device_id = Some(local);
+        let effects = runtime.effects.lock().await;
+        let moving = runtime.keyboard_switch(&link, "receiver".into(), None);
+        tokio::pin!(moving);
+        assert!(futures_util::poll!(&mut moving).is_pending());
+        // The prior transition finishes before the command checks ownership.
+        // No native injection/second transition is required or available here.
+        runtime.inner.lock().await.state.active_device_id = Some("receiver".into());
+        drop(effects);
+        moving.await.unwrap();
+        remote.close();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn local_keyboard_returns_receiver_picture_without_reading_vcp_or_injecting_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        let local = runtime.snapshot().await.device_id;
+        {
+            let mut i = runtime.inner.lock().await;
+            i.state.engine = "ready".into();
+            i.state.active_device_id = Some(local.clone());
+            i.state.display_device_id = Some("receiver".into());
+            i.state.last_display_device_id = Some("receiver".into());
+            i.state.config.display_id = "external".into();
+            i.state.config.local_input = Some(3);
+            i.state.config.peer_input = Some(1);
+            i.state.peer = Some(Peer {
+                id: "receiver".into(),
+                name: "Receiver".into(),
+                platform: "win32".into(),
+                fingerprint: "a".repeat(64),
+                file_transfer: false,
+                lock_control: false,
+                input_configured: true,
+                retained_display: false,
+                modifier_mapping: ModifierMapping::Original,
+            });
+        }
+        // Only a same-target write is allowed. A read or key injection must not
+        // be used to infer the toggle target from stale VCP/keyboard state.
+        let helper = runtime.platform.resources.join("native/bin/m1ddc");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\ntest \"$3\" = set || exit 9\ntest \"$5\" = 3 || exit 10\ntouch \"$0.called\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (remote, mut requests) = attach_with_requests(&runtime).await;
+        let target = local.clone();
+        let receiver = tokio::spawn(async move {
+            while let Some(next) = requests.recv().await {
+                if let Incoming::Request {
+                    id,
+                    method,
+                    payload,
+                } = next
+                {
+                    assert_eq!(
+                        method, "set-input",
+                        "Automatic VCP reads must not select the toggle target"
+                    );
+                    assert_eq!(payload, json!(target));
+                    remote.reply(id, Ok(json!(true))).await.unwrap();
+                    return remote;
+                }
+            }
+            panic!("No return-to-Mac picture command");
+        });
+        runtime.toggle().await.unwrap();
+        let remote = receiver.await.unwrap();
+        let state = runtime.snapshot().await;
+        assert_eq!(state.active_device_id, Some(local.clone()));
+        assert_eq!(state.display_device_id, Some(local));
+        assert!(helper.with_extension("called").exists());
+        remote.close();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn failed_ddc_retries_same_target_once_and_preserves_uncertainty_on_total_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        for (local_first, retry_fails) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = fixture(directory.path(), "host");
+            let local = runtime.snapshot().await.device_id;
+            let source = if local_first {
+                local.clone()
+            } else {
+                "receiver".into()
+            };
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.engine = "ready".into();
+                i.state.active_device_id = Some(local.clone());
+                i.state.display_device_id = Some(source.clone());
+                i.state.last_display_device_id = Some(source.clone());
+                i.state.config.display_id = "external".into();
+                i.state.config.local_input = Some(3);
+                i.state.config.peer_input = Some(1);
+                i.state.peer = Some(Peer {
+                    id: "receiver".into(),
+                    name: "Receiver".into(),
+                    platform: "win32".into(),
+                    fingerprint: "a".repeat(64),
+                    file_transfer: false,
+                    lock_control: false,
+                    input_configured: true,
+                    retained_display: false,
+                    modifier_mapping: ModifierMapping::Original,
+                });
+            }
+            let helper = runtime.platform.resources.join("native/bin/m1ddc");
+            std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            let fail_local = local_first || retry_fails;
+            std::fs::write(
+                &helper,
+                format!(
+                    "#!/bin/sh\ntest \"$3\" = set || exit 9\ntest \"$5\" = 3 || exit 10\nexit {}\n",
+                    if fail_local { 1 } else { 0 }
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (remote, mut requests) = attach_with_requests(&runtime).await;
+            let target = local.clone();
+            let receiver = tokio::spawn(async move {
+                while let Some(next) = requests.recv().await {
+                    if let Incoming::Request {
+                        id,
+                        method,
+                        payload,
+                    } = next
+                    {
+                        assert_eq!(method, "set-input");
+                        assert_eq!(payload, json!(target));
+                        let result = if !local_first || retry_fails {
+                            Err(anyhow::anyhow!("remote DDC failed"))
+                        } else {
+                            Ok(json!(true))
+                        };
+                        remote.reply(id, result).await.unwrap();
+                        return remote;
+                    }
+                }
+                panic!("No remote DDC attempt");
+            });
+            let link = runtime.link.lock().await.clone().unwrap();
+            let result = runtime.command_switch(&link, local.clone()).await;
+            let remote = receiver.await.unwrap();
+            assert_eq!(result.is_err(), retry_fails);
+            let state = runtime.snapshot().await;
+            assert_eq!(
+                state.display_device_id,
+                if retry_fails {
+                    None
+                } else {
+                    Some(local.clone())
+                }
+            );
+            assert_eq!(
+                state.last_display_device_id,
+                if retry_fails {
+                    Some(source)
+                } else {
+                    Some(local)
+                }
+            );
+            assert_eq!(
+                state.display_status,
+                if retry_fails {
+                    "uncertain"
+                } else {
+                    "commanded"
+                }
+            );
+            remote.close();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn accepted_ddc_retries_both_directions_without_poisoning_state_on_alternate_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        for local_first in [false, true] {
+            for target_local in [false, true] {
+                for alternate_fails in [false, true] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let runtime = fixture(directory.path(), "host");
+                    let local = runtime.snapshot().await.device_id;
+                    let target = if target_local {
+                        local.clone()
+                    } else {
+                        "receiver".into()
+                    };
+                    let source = if local_first {
+                        local.clone()
+                    } else {
+                        "receiver".into()
+                    };
+                    {
+                        let mut i = runtime.inner.lock().await;
+                        i.state.engine = "ready".into();
+                        // Keyboard ownership need not match the visible picture.
+                        // No native keyboard helper exists in this fixture.
+                        i.state.active_device_id = Some(target.clone());
+                        i.state.display_device_id = Some(source.clone());
+                        i.state.last_display_device_id = Some(source);
+                        i.state.config.display_id = "external".into();
+                        i.state.config.local_input = Some(3);
+                        i.state.config.peer_input = Some(1);
+                        i.state.peer = Some(Peer {
+                            id: "receiver".into(),
+                            name: "Receiver".into(),
+                            platform: "win32".into(),
+                            fingerprint: "a".repeat(64),
+                            file_transfer: false,
+                            lock_control: false,
+                            input_configured: true,
+                            retained_display: false,
+                            modifier_mapping: ModifierMapping::Original,
+                        });
+                    }
+                    let helper = runtime.platform.resources.join("native/bin/m1ddc");
+                    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+                    let value = if target_local { 3 } else { 1 };
+                    std::fs::write(&helper, format!(
+                        "#!/bin/sh\ntest \"$3\" = set || exit 9\ntest \"$5\" = {value} || exit 10\necho \"$5\" >> \"$0.called\"\nexit {}\n",
+                        if !local_first && alternate_fails { 1 } else { 0 }
+                    )).unwrap();
+                    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    let marker = helper.with_extension("called");
+                    let remote_marker = marker.clone();
+                    let expected = target.clone();
+                    let (remote, mut requests) = attach_with_requests(&runtime).await;
+                    let receiver = tokio::spawn(async move {
+                        while let Some(next) = requests.recv().await {
+                            if let Incoming::Request {
+                                id,
+                                method,
+                                payload,
+                            } = next
+                            {
+                                assert_eq!(method, "set-input");
+                                assert_eq!(payload, json!(expected));
+                                assert_eq!(
+                                    remote_marker.exists(),
+                                    local_first,
+                                    "The last picture source must be attempted first"
+                                );
+                                let reply = if local_first && alternate_fails {
+                                    Err(anyhow::anyhow!("inactive input unavailable"))
+                                } else {
+                                    // Legacy peers return true without picture verification.
+                                    Ok(json!(true))
+                                };
+                                remote.reply(id, reply).await.unwrap();
+                                return remote;
+                            }
+                        }
+                        panic!("Missing same-target remote DDC write");
+                    });
+                    let link = runtime.link.lock().await.clone().unwrap();
+                    runtime.command_switch(&link, target.clone()).await.unwrap();
+                    let remote = receiver.await.unwrap();
+                    assert_eq!(
+                        std::fs::read_to_string(marker).unwrap(),
+                        format!("{value}\n")
+                    );
+                    let state = runtime.snapshot().await;
+                    assert_eq!(state.active_device_id, Some(target.clone()));
+                    assert_eq!(state.display_device_id, Some(target.clone()));
+                    assert_eq!(state.last_display_device_id, Some(target));
+                    assert_eq!(state.display_status, "commanded");
+                    remote.close();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn stop_restart_keeps_receiver_picture_and_routes_return_command_through_receiver() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = fixture(directory.path(), "host");
@@ -403,8 +795,8 @@ mod tests {
             }
             panic!("No input-source command reached the visible receiver");
         });
-        // There is deliberately no local native binary. Choosing the wrong
-        // DDC sender therefore fails rather than silently satisfying this test.
+        // There is deliberately no local native binary. The supplementary
+        // local attempt must not erase the accepted receiver command.
         runtime.command_switch(&link, local.clone()).await.unwrap();
         let remote = receiver.await.unwrap();
         let switched = runtime.snapshot().await;

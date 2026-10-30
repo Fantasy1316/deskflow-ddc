@@ -1,4 +1,4 @@
-param([ValidateSet('list','set','host','peer','pointer','screens','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
+param([ValidateSet('list','get','set','host','peer','pointer','screens','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 Add-Type -TypeDefinition @'
@@ -118,7 +118,7 @@ public static class ScreenBridgeNative {
           string id=info.device+"#"+i;
           if(value.HasValue) {
             if(id==selected) { matched=true; if(!SetVCPFeature(physical[i].handle,0x60,(uint)value.Value)) failure=new Win32Exception(Marshal.GetLastWin32Error(), "DDC input write failed"); }
-          } else {
+          } else if(String.IsNullOrEmpty(selected) || id==selected) {
             uint type,current,max; bool readable=GetVCPFeatureAndVCPFeatureReply(physical[i].handle,0x60,out type,out current,out max);
             result.Add(new Item { id=id,name=physical[i].description,currentInput=readable?(uint?)current:null,readable=readable });
           }
@@ -137,6 +137,7 @@ function Invoke-NativeCommand([string]$Command, [string]$Monitor, [int]$InputVal
   switch ($Command) {
     'screens' { $items = [ScreenBridgeNative]::Screens(); return ,@($items.ToArray()) }
     'list' { $items = [ScreenBridgeNative]::Monitors('', $null); return ,@($items.ToArray()) }
+    'get' { $items = [ScreenBridgeNative]::Monitors($Monitor, $null); if ($items.Count -eq 1) { return $items[0].currentInput }; return $null }
     'set' { if ($InputValue -lt 0 -or $InputValue -gt 65535) { throw 'Invalid input value' }; [void][ScreenBridgeNative]::Monitors($Monitor, $InputValue); return @{ sent = $true } }
     'host' { [ScreenBridgeNative]::Hotkey($true); return @{ sent = $true } }
     'pointer' { [ScreenBridgeNative]::Position($PointerX, $PointerY); return @{ positioned = $true } }
@@ -153,7 +154,7 @@ try {
       try {
         if ($line.Length -gt 16384) { throw 'Native request too large' }
         $request = ConvertFrom-Json -InputObject $line
-        if ($null -eq $request.id -or $request.action -notin @('list','set','host','peer','pointer','screens')) { throw 'Invalid native request' }
+        if ($null -eq $request.id -or $request.action -notin @('list','get','set','host','peer','pointer','screens')) { throw 'Invalid native request' }
         $result = Invoke-NativeCommand $request.action $request.monitorId $request.value $request.x $request.y
         $response = @{ id = $request.id; ok = $true; result = $result }
       } catch { $response = @{ id = $request.id; ok = $false; error = $_.Exception.Message } }

@@ -173,6 +173,38 @@ pub fn namespace(dir: &Path) -> PathBuf {
         &hex::encode(Sha256::digest(dir.to_string_lossy().as_bytes()))[..16]
     ))
 }
+#[cfg(target_os = "macos")]
+struct SessionNamespace(PathBuf);
+#[cfg(target_os = "macos")]
+impl SessionNamespace {
+    fn create(root: &Path) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        // Qt creates a semaphore before its IPC server. A killed core can leave
+        // the semaphore locked, so never reuse a previous launch's TMPDIR.
+        // Keep the existing prefix for global engine preflight and the same
+        // short suffix length to stay below macOS's Unix socket path limit.
+        for _ in 0..8 {
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            let path = root.join(format!("ddc-core-{}", &id[..16]));
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).context("无法创建引擎临时目录"),
+            }
+        }
+        bail!("无法分配独立的引擎临时目录")
+    }
+}
+#[cfg(target_os = "macos")]
+impl Drop for SessionNamespace {
+    fn drop(&mut self) {
+        // Only this launch's freshly created directory is removed, after its
+        // owned core is reaped. Old/foreign directories are never reset.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 #[cfg(unix)]
 async fn connect_ipc(path: &Path) -> Result<tokio::net::UnixStream> {
     Ok(tokio::net::UnixStream::connect(path).await?)
@@ -241,9 +273,14 @@ impl Engine {
         dir: &Path,
         events: mpsc::Sender<Event>,
     ) -> Result<Self> {
+        assert_no_running_engine(dir).await?;
+        #[cfg(target_os = "macos")]
+        let session_namespace = SessionNamespace::create(&std::env::temp_dir())?;
+        #[cfg(target_os = "macos")]
+        let temp = &session_namespace.0;
+        #[cfg(not(target_os = "macos"))]
         let temp = namespace(dir);
         std::fs::create_dir_all(&temp)?;
-        assert_no_running_engine(dir).await?;
         let ipc = if cfg!(target_os = "macos") {
             temp.join("deskflow-core")
         } else {
@@ -325,12 +362,75 @@ impl Engine {
                 }
             });
         }
+        let (ipc_stop, ipc_task) = Self::observe_ipc(ipc, pid, events.clone());
+        let (stop, mut rx) = mpsc::channel::<oneshot::Sender<Result<()>>>(1);
+        let task = tokio::spawn(async move {
+            let guard_failed = async {
+                #[cfg(target_os = "macos")]
+                let _ = guardian.wait().await;
+                #[cfg(not(target_os = "macos"))]
+                std::future::pending::<()>().await;
+            };
+            let reason = tokio::select! {
+             result=child.wait()=>format!("{result:?}"),
+             _=guard_failed=>{
+              let _=stop_child(&mut child).await;
+              "引擎退出保护意外结束，已停止共享".to_string()
+             },
+             request=rx.recv()=>{
+              let _=ipc_stop.send(()).await;
+              let result=stop_child(&mut child).await;
+              let reason=if result.is_ok(){"stopped".to_string()}else{format!("{result:?}")};
+              if let Some(reply)=request{let _=reply.send(result);}
+              reason
+             }
+            };
+            ipc_task.abort();
+            #[cfg(target_os = "macos")]
+            guardian.finish().await;
+            #[cfg(target_os = "macos")]
+            drop(session_namespace);
+            // Deliver the exit event even under backpressure, independently of
+            // the completed child/guardian cleanup awaited by application quit.
+            tokio::spawn(async move {
+                let _ = events.send(Event::Exited(reason)).await;
+            });
+        });
+        Ok(Self {
+            pid,
+            guardian_pid,
+            stop,
+            task,
+        })
+    }
+    fn observe_ipc(
+        ipc: PathBuf,
+        _pid: u32,
+        events: mpsc::Sender<Event>,
+    ) -> (mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
         let (ipc_stop, mut ipc_rx) = mpsc::channel::<()>(1);
-        let tx = events.clone();
+        let tx = events;
         let ipc_task = tokio::spawn(async move {
             for _ in 0..72 {
                 match connect_ipc(&ipc).await {
                     Ok(socket) => {
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::io::AsRawHandle;
+                            let mut actual = 0;
+                            if unsafe {
+                                windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
+                                    socket.as_raw_handle(),
+                                    &mut actual,
+                                )
+                            } == 0
+                                || actual != _pid
+                            {
+                                // Never send even a hello/stop command to a foreign
+                                // core that raced our global IPC preflight.
+                                break;
+                            }
+                        }
                         use futures_util::StreamExt;
                         let (read, mut write) = tokio::io::split(socket);
                         let mut lines = tokio_util::codec::FramedRead::new(
@@ -368,43 +468,27 @@ impl Engine {
             }
             let _ = tx.send(Event::Ipc("observerDisconnected".into())).await;
         });
-        let (stop, mut rx) = mpsc::channel::<oneshot::Sender<Result<()>>>(1);
-        let task = tokio::spawn(async move {
-            let guard_failed = async {
-                #[cfg(target_os = "macos")]
-                let _ = guardian.wait().await;
-                #[cfg(not(target_os = "macos"))]
-                std::future::pending::<()>().await;
-            };
-            let reason = tokio::select! {
-             result=child.wait()=>format!("{result:?}"),
-             _=guard_failed=>{
-              let _=stop_child(&mut child).await;
-              "引擎退出保护意外结束，已停止共享".to_string()
-             },
-             request=rx.recv()=>{
-              let _=ipc_stop.send(()).await;
-              let result=stop_child(&mut child).await;
-              let reason=if result.is_ok(){"stopped".to_string()}else{format!("{result:?}")};
-              if let Some(reply)=request{let _=reply.send(result);}
-              reason
-             }
-            };
-            ipc_task.abort();
-            #[cfg(target_os = "macos")]
-            guardian.finish().await;
-            // Deliver the exit event even under backpressure, independently of
-            // the completed child/guardian cleanup awaited by application quit.
-            tokio::spawn(async move {
-                let _ = events.send(Event::Exited(reason)).await;
-            });
-        });
-        Ok(Self {
+        (ipc_stop, ipc_task)
+    }
+    #[cfg(windows)]
+    pub(crate) fn observe_service_ipc(
+        pid: u32,
+        events: mpsc::Sender<Event>,
+    ) -> (mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+        Self::observe_ipc(std::env::temp_dir().join("deskflow-core"), pid, events)
+    }
+    #[cfg(windows)]
+    pub(crate) fn from_service(
+        pid: u32,
+        stop: mpsc::Sender<oneshot::Sender<Result<()>>>,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
             pid,
-            guardian_pid,
+            guardian_pid: None,
             stop,
             task,
-        })
+        }
     }
     pub fn pid(&self) -> u32 {
         self.pid
@@ -454,6 +538,8 @@ mod tests {
 
     fn peer() -> Identity {
         Identity {
+            file_protocol: 1,
+            lock_control: true,
             app_version: env!("CARGO_PKG_VERSION").into(),
             id: uuid::Uuid::new_v4(),
             name: "Receiver".into(),
@@ -582,6 +668,36 @@ mod tests {
     fn stable_namespace_and_distinct_profile() {
         assert_eq!(namespace(Path::new("/a")), namespace(Path::new("/a")));
         assert_ne!(namespace(Path::new("/a")), namespace(Path::new("/b")));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn session_namespace_is_fresh_private_and_cleans_only_its_own_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("ddc-core-0123456789abcdef");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("qipc_systemsem_stale"), b"do not touch").unwrap();
+        let first = SessionNamespace::create(root.path()).unwrap();
+        let second = SessionNamespace::create(root.path()).unwrap();
+        assert_ne!(first.0, stale);
+        assert_ne!(first.0, second.0);
+        assert_eq!(
+            first.0.file_name().unwrap().len(),
+            "ddc-core-0123456789abcdef".len()
+        );
+        assert_eq!(
+            std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::write(first.0.join("qipc_systemsem_owned"), b"owned").unwrap();
+        let removed = first.0.clone();
+        drop(first);
+        assert!(!removed.exists());
+        assert!(second.0.exists());
+        assert_eq!(
+            std::fs::read(stale.join("qipc_systemsem_stale")).unwrap(),
+            b"do not touch"
+        );
     }
     #[test]
     fn rejects_certificate_and_config_injection() {

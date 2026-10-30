@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "deskflow-ddc-tauri"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -911,6 +911,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2 0.5.10",
  "tar",
  "tauri",
  "tauri-build",
@@ -923,6 +924,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

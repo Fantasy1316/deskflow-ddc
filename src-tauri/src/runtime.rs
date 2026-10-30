@@ -1,13 +1,15 @@
 mod control;
+mod display_only;
 mod engine_session;
 mod pointer_bridge;
 mod switch_flow;
+mod system_control;
 
 use crate::{
     diagnostics::Diagnostics,
     discovery::{self, Device, Discovery},
     engine::{self, Engine},
-    model::{platform, Config, Identity, ModifierMapping, Pin},
+    model::{platform, Config, Identity, ModifierMapping, OperationMode, Pin},
     platform::Platform,
     pointer::{self, Panel, Point},
     protocol::{self, Wire},
@@ -40,6 +42,8 @@ pub struct Layout {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Peer {
+    pub file_transfer: bool,
+    pub lock_control: bool,
     pub id: String,
     pub name: String,
     pub platform: String,
@@ -74,9 +78,11 @@ pub struct Snapshot {
     pub connected: bool,
     pub engine: String,
     pub engine_source: String,
+    pub windows_service: crate::windows_service::Status,
     pub peer: Option<Peer>,
     pub active_device_id: Option<String>,
     pub display_device_id: Option<String>,
+    pub display_target: Option<String>,
     pub last_display_device_id: Option<String>,
     pub display_status: String,
     pub switching: bool,
@@ -108,9 +114,11 @@ impl Snapshot {
             connected: false,
             engine: "stopped".into(),
             engine_source: "bundled".into(),
+            windows_service: crate::windows_service::Status::default(),
             peer: None,
             active_device_id: None,
             display_device_id: None,
+            display_target: None,
             last_display_device_id: None,
             display_status: "uninitialized".into(),
             switching: false,
@@ -157,6 +165,7 @@ impl Snapshot {
         self.connection = None;
     }
     fn reset_display(&mut self) {
+        self.display_target = None;
         self.display_device_id = None;
         self.last_display_device_id = None;
         self.display_status = "uninitialized".into();
@@ -192,6 +201,7 @@ impl Inner {
     }
 }
 struct Link {
+    address: std::net::IpAddr,
     id: u64,
     epoch: u64,
     session: Session,
@@ -209,6 +219,7 @@ struct Completed {
     error: Option<String>,
 }
 pub struct Runtime {
+    pub transfers: Arc<crate::transfer::Manager>,
     inner: Mutex<Inner>,
     pub platform: Platform,
     discovery: Mutex<Option<Discovery>>,
@@ -246,6 +257,7 @@ impl Runtime {
         let (observed, _) = broadcast::channel(32);
         let (completed, _) = broadcast::channel(32);
         let runtime = Arc::new(Self {
+            transfers: crate::transfer::Manager::new(directory.join("transfers"))?,
             inner: Mutex::new(Inner {
                 store,
                 state,
@@ -291,12 +303,14 @@ impl Runtime {
                 }),
             )
             .await;
-        if let Err(error) = engine::assert_no_running_engine(&runtime.directory).await {
-            runtime.log("error", &format!("启动检查：{error}")).await;
+        if runtime.snapshot().await.config.mode == OperationMode::Sharing {
+            if let Err(error) = engine::assert_no_running_engine(&runtime.directory).await {
+                runtime.log("error", &format!("启动检查：{error}")).await;
+            }
+            runtime
+                .log("info", "开始共享前请先停止旧版或独立 Deskflow 的共享。")
+                .await;
         }
-        runtime
-            .log("info", "开始共享前请先停止旧版或独立 Deskflow 的共享。")
-            .await;
         let this = runtime.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -317,6 +331,73 @@ impl Runtime {
     }
     pub async fn snapshot(&self) -> Snapshot {
         self.inner.lock().await.state.clone()
+    }
+    pub async fn send_files(self: &Arc<Self>, paths: Vec<PathBuf>) -> Result<()> {
+        let link = self
+            .link
+            .lock()
+            .await
+            .clone()
+            .context("请先连接已配对的电脑")?;
+        let peer = link.peer.borrow().clone().context("尚未识别对端设备")?;
+        ensure!(
+            peer.file_protocol == 1,
+            "对端不支持文件传输，请更新两端应用"
+        );
+        ensure!(self.current(&link), "配对连接已断开");
+        let id = self.transfers.prepare(paths, peer.id, peer.name).await?;
+        self.resume_transfer(id).await
+    }
+    pub async fn resume_transfer(&self, id: uuid::Uuid) -> Result<()> {
+        let link = self
+            .link
+            .lock()
+            .await
+            .clone()
+            .context("请先连接已配对的电脑")?;
+        let peer = link.peer.borrow().clone().context("尚未识别对端设备")?;
+        ensure!(
+            peer.file_protocol == 1,
+            "对端不支持文件传输，请更新两端应用"
+        );
+        ensure!(self.current(&link), "配对连接已断开");
+        let invitation = self.transfers.offer(id, peer.id, link.address).await?;
+        let result = link
+            .session
+            .request(
+                "file-offer",
+                serde_json::to_value(invitation)?,
+                Duration::from_secs(10),
+            )
+            .await;
+        if result.is_err() {
+            let _ = self.transfers.pause(id);
+        }
+        result.map(|_| ())
+    }
+    pub async fn cancel_transfer(&self, id: uuid::Uuid) -> Result<()> {
+        let owner = self.transfers.cancellation_peer(id)?;
+        let local = self.transfers.cancel(id).await;
+        // A declined offer has no data connection to close. Explicitly release
+        // the authenticated peer's listener and concurrency slot as well.
+        let link = self.link.lock().await.clone();
+        let remote = if let Some(link) = link.filter(|link| {
+            self.current(link)
+                && link
+                    .peer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| Some(p.id) == owner)
+        }) {
+            link.session
+                .request("file-cancel", json!(id), Duration::from_secs(10))
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+        local?;
+        remote.context("本地任务已取消，但未能确认对端任务已停止，请重试")
     }
     fn publish(&self) {
         self.dirty.store(true, Ordering::Release);
@@ -356,7 +437,11 @@ impl Runtime {
     }
     pub async fn refresh(&self) -> Result<()> {
         let c = self.snapshot().await.config;
-        let path = self.binary(&c);
+        let path = if c.mode == OperationMode::Sharing {
+            self.binary(&c).ok()
+        } else {
+            None
+        };
         let (control, accessibility, screens) = tokio::join!(
             self.platform.available(),
             self.platform.accessibility(),
@@ -364,7 +449,7 @@ impl Runtime {
         );
         let mut i = self.inner.lock().await;
         i.state.dependencies = Dependencies {
-            deskflow: path.is_ok(),
+            deskflow: path.is_some(),
             display_control: control,
             accessibility,
         };
@@ -398,6 +483,7 @@ impl Runtime {
     }
     pub async fn save(&self, c: Config) -> Result<()> {
         c.validate()?;
+        let _lifecycle = self.start_stop.lock().await;
         {
             let mut i = self.inner.lock().await;
             ensure!(!i.state.running, "请先停止共享，再修改配置");
@@ -407,7 +493,18 @@ impl Runtime {
                 i.store.value.config = old;
                 return Err(e);
             }
-            i.state.config = c;
+            if old.mode != c.mode
+                || old.display_id != c.display_id
+                || old.local_input != c.local_input
+                || old.peer_input != c.peer_input
+            {
+                i.state.reset_display();
+            }
+            i.state.config = c.clone();
+        }
+        if c.mode == OperationMode::DisplayOnly {
+            self.discovery.lock().await.take();
+            self.transfers.suspend().await;
         }
         self.refresh().await?;
         self.log("success", "设置已保存").await;
@@ -421,6 +518,10 @@ impl Runtime {
         Ok(())
     }
     pub async fn discover(&self) -> Result<()> {
+        ensure!(
+            self.snapshot().await.config.mode == OperationMode::Sharing,
+            "仅切换显示器模式无需设备发现"
+        );
         self.inner.lock().await.state.discovering = true;
         self.publish();
         let result = async {
@@ -451,6 +552,7 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         ensure!(!i.state.running, "请先停止共享");
         i.store.import_legacy_config(&file)?;
+        self.transfers.pause_all();
         let code = i.store.pairing.clone();
         i.state.pairing_changed(code);
         i.state.config = i.store.value.config.clone();
@@ -469,6 +571,7 @@ impl Runtime {
         ensure!(!i.state.running, "请先停止共享");
         let code = protocol::new_pairing();
         i.replace_pairing(code)?;
+        self.transfers.pause_all();
         self.publish();
         Ok(())
     }
@@ -483,6 +586,8 @@ impl Runtime {
         let c = &i.state.config;
         c.ready()?;
         Ok(Identity {
+            file_protocol: 1,
+            lock_control: platform() == "win32",
             app_version: env!("CARGO_PKG_VERSION").into(),
             id: i.store.value.id,
             name: c.device_name.clone(),
@@ -506,6 +611,9 @@ impl Runtime {
     pub async fn start(self: &Arc<Self>, pairing: Option<String>) -> Result<()> {
         let _lifecycle = self.start_stop.lock().await;
         ensure!(!self.snapshot().await.running, "共享已经启动");
+        if self.snapshot().await.config.mode == OperationMode::DisplayOnly {
+            return self.start_display_only().await;
+        }
         self.trace(
             "sharing.startRequested",
             json!({"version":env!("CARGO_PKG_VERSION")}),
@@ -516,6 +624,15 @@ impl Runtime {
         let state = self.snapshot().await;
         let c = state.config;
         c.ready()?;
+        #[cfg(windows)]
+        if c.windows_secure_input && c.role == "client" {
+            ensure!(c.deskflow_path.is_empty(), "安全桌面模式仅支持内置引擎");
+            self.refresh_windows_service().await?;
+            ensure!(
+                self.snapshot().await.windows_service.current,
+                "后台服务未安装或需要更新，请在共享设置中安装/更新服务"
+            );
+        }
         self.binary(&c)?;
         ensure!(
             state.dependencies.display_control,
@@ -552,6 +669,7 @@ impl Runtime {
             );
             if code.trim() != i.store.pairing {
                 i.replace_pairing(code.trim().into())?;
+                self.transfers.pause_all();
             }
             i.state.pairing_code = i.store.pairing.clone();
             i.state.has_saved_pairing = i.store.value.trusted_peer.is_some();
@@ -570,6 +688,7 @@ impl Runtime {
         self.topology_ready.send_replace(true);
         let cancel = CancellationToken::new();
 
+        self.transfers.enable();
         {
             let mut i = self.inner.lock().await;
             // Explicit restart remains the recovery path after the user manually
@@ -676,6 +795,7 @@ impl Runtime {
             // An interrupted switch stays uncertain until explicit recovery.
             i.state.control_disconnected();
         }
+        self.transfers.reset_network();
         self.command_pending.store(false, Ordering::Release);
         self.keyboard_pending.store(0, Ordering::Release);
         self.publish();
@@ -698,7 +818,7 @@ impl Runtime {
             }
         }
         Ok(
-            json!({"app":"deskflow-ddc","version":env!("CARGO_PKG_VERSION"),"runtime":"tauri2","exportedAt":chrono::Utc::now(),"state":state,"files":files}),
+            json!({"app":"deskflow-ddc","version":env!("CARGO_PKG_VERSION"),"runtime":"tauri2","exportedAt":chrono::Utc::now(),"state":state,"files":files,"fileTransfers":self.transfers.snapshot(),"fileTransferNetwork":self.transfers.network_snapshot(),"fileTransferWarnings":self.transfers.warnings()}),
         )
     }
     pub async fn data_directory(&self) -> PathBuf {
@@ -706,6 +826,9 @@ impl Runtime {
     }
     pub async fn shortcut(&self) -> Option<String> {
         let s = self.snapshot().await;
+        if s.config.mode == OperationMode::DisplayOnly {
+            return (s.running && s.config.ready().is_ok()).then_some(s.config.shortcut);
+        }
         let manual = s
             .session_layout
             .as_ref()
@@ -813,7 +936,7 @@ pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Ident
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn snapshot() -> Snapshot {
+    pub(super) fn snapshot() -> Snapshot {
         let dir = tempfile::tempdir().unwrap();
         let store = Store {
             directory: dir.path().into(),
@@ -900,6 +1023,8 @@ mod tests {
     }
     pub(super) fn peer() -> Identity {
         Identity {
+            file_protocol: 1,
+            lock_control: true,
             app_version: env!("CARGO_PKG_VERSION").into(),
             id: uuid::Uuid::new_v4(),
             name: "peer".into(),

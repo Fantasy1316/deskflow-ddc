@@ -32,8 +32,42 @@ impl Runtime {
         let binary = self.binary(&c)?;
         let (tx, mut rx) = mpsc::channel(64);
         let (transitions, mut changes) = mpsc::channel(32);
+        let starting_at = std::time::Instant::now();
+        let launch_mode = if cfg!(windows) && c.windows_secure_input && c.role == "client" {
+            "windowsService"
+        } else {
+            "userProcess"
+        };
+        self.trace(
+            "engine.startRequested",
+            json!({"launchMode":launch_mode,"session":link.id}),
+        )
+        .await;
+        #[cfg(windows)]
+        let engine = if c.windows_secure_input && c.role == "client" {
+            ensure!(c.deskflow_path.is_empty(), "安全桌面模式仅支持内置引擎");
+            engine::assert_no_running_engine(&dir).await?;
+            crate::windows_service::start(
+                crate::windows_service::Launch {
+                    protocol: crate::windows_service::PROTOCOL,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    local: uuid::Uuid::parse_str(&id)?,
+                    host: peer.id,
+                    address,
+                    port: c.deskflow_port,
+                    certificate: std::fs::read_to_string(dir.join("identity.pem"))?,
+                    fingerprint: peer.fingerprint.clone(),
+                    swap_modifiers: c.modifier_mapping.swaps_between(&peer.platform, "win32"),
+                },
+                tx,
+            )
+            .await?
+        } else {
+            Engine::start(binary.clone(), &c, &settings, &dir, tx).await?
+        };
+        #[cfg(not(windows))]
         let engine = Engine::start(binary.clone(), &c, &settings, &dir, tx).await?;
-        self.trace("engine.started", json!({"pid":engine.pid(),"guardianPid":engine.guardian_pid(),"parentPid":std::process::id(),"binary":binary,"session":link.id,"version":env!("CARGO_PKG_VERSION")})).await;
+        self.trace("engine.started", json!({"pid":engine.pid(),"guardianPid":engine.guardian_pid(),"parentPid":std::process::id(),"binary":binary,"launchMode":launch_mode,"startupElapsedMs":starting_at.elapsed().as_millis(),"session":link.id,"version":env!("CARGO_PKG_VERSION")})).await;
         *guard = Some(engine);
         {
             let mut i = self.inner.lock().await;

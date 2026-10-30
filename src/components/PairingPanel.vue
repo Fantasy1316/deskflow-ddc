@@ -2,19 +2,26 @@
 import { computed, shallowRef } from 'vue'
 import AppIcon from './AppIcon.vue'
 import DeviceDiscovery from './DeviceDiscovery.vue'
+import SettingsLock from './SettingsLock.vue'
 import type { DiscoveredDevice } from '../shared/types'
 import { z } from 'zod'
 import { useConfigDraft } from '../composables/useConfigDraft'
-import type { Action, Snapshot } from '../shared/types'
+import type { Action, Config, Snapshot } from '../shared/types'
 import { canStartSharing } from '../shared/pairing'
-const props = defineProps<{ state: Snapshot; busy: boolean }>()
+const props = defineProps<{
+  state: Snapshot
+  busy: boolean
+  connect: (config: Config, pairingCode?: string) => Promise<boolean>
+}>()
 const emit = defineEmits<{ action: [action: Action] }>()
 const { draft, value } = useConfigDraft(() => props.state.config)
 const pairingCode = shallowRef(''),
   showCode = shallowRef(false)
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
 const locked = computed(() => props.busy || props.state.running)
-const canStart = computed(() => canStartSharing(props.state, pairingCode.value))
+const canStart = computed(() =>
+  canStartSharing({ ...props.state, config: value() }, pairingCode.value),
+)
 const fallbackText = computed({
   get: () => (draft.fallbackIps ?? []).join(', '),
   set: (text: string) => {
@@ -35,16 +42,24 @@ const valid = computed(
       .max(8)
       .safeParse(draft.fallbackIps ?? []).success,
 )
+async function connectDevices() {
+  if (props.busy || props.state.running || !valid.value || !canStart.value) return
+  const success = await props.connect(
+    value(),
+    draft.role === 'client' ? pairingCode.value.trim() : undefined,
+  )
+  if (success) pairingCode.value = ''
+}
 </script>
 <template>
   <section>
     <div class="page-heading">
       <div>
-        <span class="eyebrow">DEVICES & PAIRING</span>
-        <h1>连接你的另一半工作空间。</h1>
-        <p>选择键鼠所在电脑，让设备在同一个局域网中相遇。</p>
+        <h1>设备与配对</h1>
+        <p>选择键鼠提供端，在同一局域网中连接两台电脑。</p>
       </div>
     </div>
+    <SettingsLock v-if="state.running" :busy="busy" @stop="emit('action', { type: 'stop' })" />
     <form @submit.prevent="emit('action', { type: 'save', config: value() })">
       <div class="panel">
         <div class="panel-heading">
@@ -89,7 +104,8 @@ const valid = computed(
         </div>
       </div>
     </form>
-    <div class="inline-info">
+    <details class="legacy-import">
+      <summary>从 0.1 版本迁移配置</summary>
       0.2 的身份和配置独立于 0.1。可导入旧版设备设置，之后需要重新配对。
       <button
         class="text-button"
@@ -98,15 +114,15 @@ const valid = computed(
       >
         导入旧版配置
       </button>
-    </div>
+    </details>
     <div class="panel">
       <div class="panel-heading">
         <span class="section-icon"><AppIcon name="link" /></span>
         <div>
-          <h2>{{ state.config.role === 'host' ? '等待另一台电脑加入' : '加入键鼠提供端' }}</h2>
+          <h2>{{ draft.role === 'host' ? '等待另一台电脑加入' : '加入键鼠提供端' }}</h2>
           <p>
             {{
-              state.config.role === 'host'
+              draft.role === 'host'
                 ? '在另一台电脑安装 Deskflow DDC，选择接收键鼠，再填写以下信息。'
                 : state.hasSavedPairing
                   ? '已保存配对，可直接开始共享；需要连接其他电脑时，请填写新地址和配对码。'
@@ -116,7 +132,7 @@ const valid = computed(
         </div>
         <span v-if="state.connected" class="badge success">已连接</span>
       </div>
-      <template v-if="state.config.role === 'host'"
+      <template v-if="draft.role === 'host'"
         ><div class="pairing-details">
           <div class="connection-address">
             <span class="field-label">本机主机名</span
@@ -196,7 +212,9 @@ const valid = computed(
             >每次重连会重新解析主机名；解析失败时尝试发现的地址、备用 IP 和上次已认证地址。</small
           ></label
         >
-        <p v-if="dirty" class="hint">地址已修改，请先点击上方“保存设备设置”。</p></template
+        <p v-if="dirty" class="hint">
+          地址或设备设置已修改；点击下方“保存并连接”会先保存，再建立连接。
+        </p></template
       >
       <div v-if="state.peer" class="paired-device">
         <span class="device-avatar"><AppIcon name="laptop" /></span>
@@ -209,6 +227,9 @@ const valid = computed(
         </div>
         <AppIcon name="shield" :size="20" />
       </div>
+      <p v-if="!state.running && !canStart" class="hint">
+        首次配对需要填写提供端地址和完整配对码。已保存的配对可以留空复用。
+      </p>
       <div class="form-footer">
         <span>{{
           state.engine === 'error'
@@ -231,20 +252,17 @@ const valid = computed(
         ><button
           v-else
           class="button primary"
-          :disabled="busy || dirty || !canStart"
-          @click="
-            emit('action', {
-              type: 'start',
-              pairingCode: state.config.role === 'client' ? pairingCode : undefined,
-            })
-          "
+          :disabled="busy || !valid || !canStart"
+          @click="connectDevices"
         >
           <AppIcon name="link" :size="16" />{{
-            state.config.role === 'host'
-              ? '开始等待连接'
-              : state.hasSavedPairing
-                ? '开始共享'
-                : '配对并开始共享'
+            dirty
+              ? '保存并连接'
+              : draft.role === 'host'
+                ? '开始等待连接'
+                : state.hasSavedPairing
+                  ? '开始共享'
+                  : '配对并开始共享'
           }}
         </button>
       </div>

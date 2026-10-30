@@ -26,6 +26,7 @@ import {
   Wifi,
   ExternalLink,
   Download,
+  Upload,
 } from 'lucide-vue-next'
 const icons = {
   monitor: Monitor,
@@ -54,6 +55,7 @@ const icons = {
   wifi: Wifi,
   external: ExternalLink,
   download: Download,
+  upload: Upload,
 }
 defineProps<{ name: keyof typeof icons; size?: number }>()
 </script>

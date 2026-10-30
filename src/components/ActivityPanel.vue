@@ -14,8 +14,7 @@ const time = (value: string) =>
   <section>
     <div class="page-heading activity-heading">
       <div>
-        <span class="eyebrow">ACTIVITY</span>
-        <h1>每一次连接，都有迹可循。</h1>
+        <h1>活动记录</h1>
         <p>出现错误后，导出两台电脑的诊断日志即可协助排查。</p>
       </div>
       <button class="button primary" :disabled="busy || preview" @click="$emit('export')">
@@ -90,8 +89,8 @@ const time = (value: string) =>
   font-weight: 600;
 }
 .log-summary p {
-  color: #879786;
-  font-size: 10px;
+  color: #627467;
+  font-size: 12px;
   line-height: 1.8;
   margin-top: 7px;
 }

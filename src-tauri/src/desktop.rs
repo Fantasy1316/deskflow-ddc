@@ -21,6 +21,8 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
+mod file_drop;
+mod files;
 
 #[derive(Default)]
 struct ExitState(AtomicU8);
@@ -85,6 +87,10 @@ pub enum Action {
     TestInput {
         value: u16,
     },
+    LockPeer {},
+    InstallWindowsService {},
+    RemoveWindowsService {},
+    CheckWindowsService {},
     Scan {},
     Stop {},
     ChooseDeskflow {},
@@ -111,7 +117,7 @@ fn sender(window: &tauri::WebviewWindow) -> Result<()> {
     let url = window.url()?;
     let local = url.scheme() == "tauri"
         || url.host_str() == Some("tauri.localhost")
-        || cfg!(debug_assertions)
+        || tauri::is_dev()
             && url.scheme() == "http"
             && url.host_str() == Some("127.0.0.1")
             && url.port() == Some(5174);
@@ -170,6 +176,10 @@ async fn dispatch(app: &tauri::AppHandle, runtime: &Arc<Runtime>, action: Action
             runtime.switch_to(target == "local").await
         }
         Action::TestInput { value } => runtime.test_input(value).await,
+        Action::LockPeer {} => runtime.lock_peer().await,
+        Action::InstallWindowsService {} => runtime.manage_windows_service(false).await,
+        Action::RemoveWindowsService {} => runtime.manage_windows_service(true).await,
+        Action::CheckWindowsService {} => runtime.refresh_windows_service().await,
         Action::Scan {} => runtime.scan().await,
         Action::Stop {} => runtime.stop().await,
         Action::Discover {} => runtime.discover().await,
@@ -277,20 +287,48 @@ struct TrayControls {
     local: MenuItem<tauri::Wry>,
     peer: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
+    lock: MenuItem<tauri::Wry>,
     busy: Arc<AtomicBool>,
 }
 impl TrayControls {
     fn sync(&self, state: &Snapshot) {
         let idle = !self.busy.load(Ordering::Acquire);
+        let display_only = state.config.mode == crate::model::OperationMode::DisplayOnly;
         let can_switch = idle
             && state.running
-            && state.connected
-            && state.engine == "ready"
             && !state.switching
-            && state.display_status != "uncertain";
+            && (display_only
+                || (state.connected
+                    && state.engine == "ready"
+                    && state.display_status != "uncertain"));
+        let _ = self.stop.set_text(if display_only {
+            "停用显示器切换"
+        } else {
+            "停止共享"
+        });
+        let _ = self.local.set_text(if display_only {
+            "切换到本机输入"
+        } else {
+            "切换到本机"
+        });
+        let _ = self.peer.set_text(if display_only {
+            "切换到另一输入"
+        } else {
+            "切换到另一台"
+        });
         let _ = self.local.set_enabled(can_switch);
         let _ = self.peer.set_enabled(can_switch);
         let _ = self.stop.set_enabled(idle && state.running);
+        let _ = self.lock.set_enabled(
+            idle && state.running
+                && state.connected
+                && state.engine == "ready"
+                && state.config.role == "host"
+                && state
+                    .peer
+                    .as_ref()
+                    .is_some_and(|p| p.platform == "win32" && p.lock_control),
+        );
     }
 }
 fn tray_action(id: &str) -> Option<Action> {
@@ -302,6 +340,7 @@ fn tray_action(id: &str) -> Option<Action> {
             target: "peer".into(),
         }),
         "stop" => Some(Action::Stop {}),
+        "lock-peer" => Some(Action::LockPeer {}),
         _ => None,
     }
 }
@@ -378,6 +417,7 @@ fn quit_from(app: &tauri::AppHandle, source: &'static str) {
         let _action = runtime.actions.lock().await;
         match runtime.stop().await {
             Ok(()) => {
+                runtime.transfers.shutdown().await;
                 runtime.shutdown.cancel();
                 runtime
                     .trace("app.exitReady", json!({"ownedEngineStopped":true}))
@@ -425,6 +465,7 @@ fn sync_shortcuts(app: tauri::AppHandle, runtime: Arc<Runtime>) {
                         if event.state() == ShortcutState::Pressed {
                             let rt = rt.clone();
                             tauri::async_runtime::spawn(async move {
+                                rt.trace("shortcut.pressed", json!({})).await;
                                 if rt.shortcut().await.is_some() {
                                     if let Err(e) = rt.toggle().await {
                                         rt.log("error", &e.to_string()).await;
@@ -454,6 +495,48 @@ fn sync_shortcuts(app: tauri::AppHandle, runtime: Arc<Runtime>) {
         }
     });
 }
+fn sync_lock_shortcut(app: tauri::AppHandle, runtime: Arc<Runtime>) {
+    tauri::async_runtime::spawn(async move {
+        let mut current = String::new();
+        let mut retry = tokio::time::Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! { _ = runtime.shutdown.cancelled() => break, _ = interval.tick() => {} }
+            let wanted = runtime.lock_shortcut().await.unwrap_or_default();
+            if current != wanted && !current.is_empty() {
+                let _ = app.global_shortcut().unregister(current.as_str());
+                current.clear();
+                retry = tokio::time::Instant::now();
+            }
+            if !wanted.is_empty() && current.is_empty() && tokio::time::Instant::now() >= retry {
+                let rt = runtime.clone();
+                match app
+                    .global_shortcut()
+                    .on_shortcut(wanted.as_str(), move |_, _, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            let rt = rt.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(error) = rt.lock_from_shortcut().await {
+                                    rt.log("error", &error.to_string()).await;
+                                }
+                            });
+                        }
+                    }) {
+                    Ok(()) => current = wanted,
+                    Err(error) => {
+                        runtime
+                            .log("error", &format!("锁屏快捷键注册失败，将自动重试：{error}"))
+                            .await;
+                        retry = tokio::time::Instant::now() + Duration::from_secs(30);
+                    }
+                }
+            }
+        }
+        if !current.is_empty() {
+            let _ = app.global_shortcut().unregister(current.as_str());
+        }
+    });
+}
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
@@ -461,9 +544,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![snapshot, act, report_error])
+        .invoke_handler(tauri::generate_handler![snapshot, act, report_error, files::file_snapshot, files::file_action])
         .setup(|app| {
-            let resource = if cfg!(debug_assertions) {
+            let resource = if tauri::is_dev() {
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
             } else {
                 app.path().resource_dir()?.join("resources")
@@ -478,7 +561,11 @@ pub fn run() {
                 }
             };
             app.manage(runtime.clone());
+            if let Err(error) = tauri::async_runtime::block_on(runtime.refresh_windows_service()) {
+                tauri::async_runtime::block_on(runtime.log("error", &format!("后台服务检测失败，普通共享仍可使用：{error}")));
+            }
             app.manage(ExitState::default());
+            app.manage(file_drop::FileDrops::default());
             #[cfg(target_os = "macos")]
             install_dock_quit(app.handle())?;
             let show_item = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
@@ -487,6 +574,7 @@ pub fn run() {
                 local: MenuItem::with_id(app, "switch-local", "切换到本机", false, None::<&str>)?,
                 peer: MenuItem::with_id(app, "switch-peer", "切换到另一台", false, None::<&str>)?,
                 stop: MenuItem::with_id(app, "stop", "停止共享", false, None::<&str>)?,
+                lock: MenuItem::with_id(app, "lock-peer", "锁定 Windows 接收端", false, None::<&str>)?,
                 busy: Arc::new(AtomicBool::new(false)),
             };
             controls.sync(&tauri::async_runtime::block_on(runtime.snapshot()));
@@ -496,6 +584,7 @@ pub fn run() {
                 &PredefinedMenuItem::separator(app)?,
                 &controls.local,
                 &controls.peer,
+                &controls.lock,
                 &controls.stop,
                 &PredefinedMenuItem::separator(app)?,
                 &quit_item,
@@ -565,6 +654,9 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let rt = runtime.clone();
                 window.on_window_event(move |event| match event {
+                    // The primary WebviewWindow receives native drops through
+                    // WindowEvent, not the child-Webview event callback.
+                    tauri::WindowEvent::DragDrop(event) => file_drop::handle(&handle, event),
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         if has_tray && !handle.state::<ExitState>().requested() {
@@ -598,7 +690,8 @@ pub fn run() {
                     let _ = handle.emit_to("main", "bridge-state", snapshot);
                 }
             });
-            sync_shortcuts(app.handle().clone(), runtime);
+            sync_shortcuts(app.handle().clone(), runtime.clone());
+            sync_lock_shortcut(app.handle().clone(), runtime);
             Ok(())
         })
         .build(tauri::generate_context!())

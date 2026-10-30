@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AppIcon from './AppIcon.vue'
+import SettingsLock from './SettingsLock.vue'
 import PointerSettings from './PointerSettings.vue'
 import ModifierSettings from './ModifierSettings.vue'
+import WindowsServiceSettings from './WindowsServiceSettings.vue'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
 const props = defineProps<{ state: Snapshot; busy: boolean; checkingAccessibility: boolean }>()
@@ -34,11 +36,11 @@ const label = (value: string) =>
   <section>
     <div class="page-heading">
       <div>
-        <span class="eyebrow">MAKE IT YOURS</span>
-        <h1>让切换符合你的习惯。</h1>
+        <h1>共享设置</h1>
         <p>共享方式由你决定，键鼠可以连接在任意一端。</p>
       </div>
     </div>
+    <SettingsLock v-if="state.running" :busy="busy" @stop="emit('action', { type: 'stop' })" />
     <form @submit.prevent="emit('action', { type: 'save', config: value() })">
       <div class="panel">
         <div class="panel-heading">
@@ -65,6 +67,10 @@ const label = (value: string) =>
             </option>
           </select></label
         >
+        <p class="hint">
+          停止共享后可修改；保存并开始共享后生效。Mac 上 Alt 对应 Option，F 功能键可能需要
+          Fn。快捷键被系统或其他应用占用时可能无法响应。
+        </p>
         <div class="setting-row">
           <div>
             <strong>恢复到键鼠提供端</strong>
@@ -75,6 +81,21 @@ const label = (value: string) =>
       </div>
       <div v-if="reservedShortcut" class="inline-info" role="alert">
         F12 是 Windows 保留键。请选择 Ctrl + Alt + F10 或 F9，保存后重新开始共享。
+      </div>
+      <WindowsServiceSettings
+        v-model="draft.windowsSecureInput"
+        :state="state"
+        :busy="busy"
+        @action="emit('action', $event)"
+      />
+      <div class="panel">
+        <div class="setting-row">
+          <div>
+            <strong>锁定 Windows 接收端</strong>
+            <p>键鼠切到 Windows 后使用；也可从工作台或托盘菜单锁屏。Mac 上 Alt 对应 Option。</p>
+          </div>
+          <kbd>Ctrl + Alt + Shift + L</kbd>
+        </div>
       </div>
       <ModifierSettings
         v-model="draft.modifierMapping"
@@ -211,7 +232,7 @@ const label = (value: string) =>
       </button>
       <div class="dependency-row">
         <div>
-          <strong>显示器控制后端</strong>
+          <strong>显示器控制组件</strong>
           <p>
             {{
               state.platform === 'win32' ? 'Windows DXVA2 / DDC/CI' : 'Apple Silicon 原生 DDC/CI'
@@ -219,9 +240,12 @@ const label = (value: string) =>
           </p>
         </div>
         <span :class="['badge', state.dependencies.displayControl ? 'success' : 'neutral']">{{
-          state.dependencies.displayControl ? '已就绪' : '桌面版检测'
+          state.dependencies.displayControl ? '组件可用' : '组件未就绪'
         }}</span>
       </div>
+      <p class="hint">
+        组件可用不代表显示器支持 DDC 输入切换，请在“显示器与输入”中分别测试两个方向。
+      </p>
       <div v-if="state.platform === 'darwin'" class="dependency-row">
         <div>
           <strong>辅助功能权限</strong>

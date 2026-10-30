@@ -1,6 +1,6 @@
 [package]
 name = "deskflow-ddc-tauri"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 default-run = "deskflow-ddc"
 rust-version = "1.90"
@@ -40,6 +40,7 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 mdns-sd = "0.13"
 if-addrs = "0.13"
+socket2 = "0.5"
 hostname = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 libc = "0.2"
@@ -65,3 +66,6 @@ required-features = ["desktop"]
 strip = true
 opt-level = "s"
 lto = "thin"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Com"] }

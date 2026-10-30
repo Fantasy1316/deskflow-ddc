@@ -242,6 +242,7 @@ impl Runtime {
         ensure!(self.epoch.load(Ordering::Acquire) == epoch, "共享已停止");
         let (session, mut incoming) = Session::spawn(wire);
         let link = Arc::new(Link {
+            address,
             id,
             epoch,
             session: session.clone(),
@@ -305,6 +306,8 @@ impl Runtime {
         address: std::net::IpAddr,
         source: &str,
     ) -> Result<()> {
+        self.transfers.reset_network();
+        let identified_at = std::time::Instant::now();
         let response = link
             .session
             .request(
@@ -313,6 +316,8 @@ impl Runtime {
                 Duration::from_secs(10),
             )
             .await?;
+        self.transfers
+            .observe_control_latency(identified_at.elapsed());
         let response: Identity = serde_json::from_value(response)?;
         response.validate()?;
         let peer = wait_identified(
@@ -341,12 +346,16 @@ impl Runtime {
             self.publish_control(link, None).await;
         }
         self.start_engine(link, &peer, address).await?;
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(4));
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _=link.session.closed.cancelled()=>bail!("对端连接已断开"),
                 _ = heartbeat.tick() => {
-                    link.session.request("ping", Value::Null, Duration::from_secs(5)).await?;
+                    let ping = std::time::Instant::now();
+                    let result = link.session.request("ping", Value::Null, Duration::from_secs(5)).await;
+                    self.transfers.observe_control_latency(ping.elapsed());
+                    result?;
                 }
             }
         }
@@ -429,6 +438,8 @@ impl Runtime {
             i.store.save()?;
             i.state.has_saved_pairing = true;
             i.state.peer = Some(Peer {
+                file_transfer: peer.file_protocol == 1,
+                lock_control: peer.lock_control,
                 id: peer.id.to_string(),
                 name: peer.name.clone(),
                 platform: peer.platform.clone(),
@@ -461,7 +472,52 @@ impl Runtime {
         }
         let peer = link.peer.borrow().clone().context("尚未识别对端设备")?;
         match method {
+            "file-cancel" => {
+                ensure!(peer.file_protocol == 1, "对端未声明文件传输协议");
+                let id: uuid::Uuid = serde_json::from_value(payload)?;
+                self.transfers.cancel_from_peer(id, peer.id).await?;
+                Ok(json!(true))
+            }
+            "file-offer" => {
+                ensure!(peer.file_protocol == 1, "对端未声明文件传输协议");
+                let invitation: crate::transfer::Invitation = serde_json::from_value(payload)?;
+                self.transfers
+                    .incoming(invitation, link.address, peer.id, peer.name)?;
+                Ok(json!(true))
+            }
             "ping" => Ok(json!("pong")),
+            "lock-session" => {
+                let s = self.snapshot().await;
+                ensure!(
+                    s.config.role == "client" && platform() == "win32" && peer.role == "host",
+                    "只允许提供端锁定 Windows 接收端"
+                );
+                ensure!(
+                    s.running && s.engine == "ready" && self.current(link),
+                    "共享引擎尚未就绪"
+                );
+                ensure!(
+                    payload.as_object().is_some_and(|v| v.is_empty()),
+                    "锁屏参数无效"
+                );
+                self.platform.lock_session().await?;
+                self.trace("system.lockAccepted", json!({"session":link.id}))
+                    .await;
+                Ok(json!(true))
+            }
+            "get-input-source" => {
+                let source = self.read_display_source(&peer.id.to_string()).await?;
+                ensure!(self.current(link), "共享会话已结束");
+                Ok(json!(source))
+            }
+            "toggle" => {
+                ensure!(
+                    self.snapshot().await.config.role == "host",
+                    "只有提供端可以协调切换"
+                );
+                self.command_switch_target(link, None).await?;
+                Ok(json!(true))
+            }
             "set-input" => {
                 let target = target_id(&payload)?;
                 let s = self.snapshot().await;
@@ -475,18 +531,28 @@ impl Runtime {
                     target == s.device_id || target == peer.id.to_string(),
                     "无效的切换目标"
                 );
-                self.platform
-                    .input(
-                        &s.config.display_id,
-                        if target == s.device_id {
-                            s.config.local_input.unwrap()
-                        } else {
-                            s.config.peer_input.unwrap()
-                        },
-                    )
-                    .await?;
+                let value = if target == s.device_id {
+                    s.config.local_input.context("未设置本机输入源")?
+                } else {
+                    s.config.peer_input.context("未设置对端输入源")?
+                };
+                self.trace(
+                    "display.remoteWriteRequested",
+                    json!({"target":target,"monitor":s.config.display_id,"value":value}),
+                )
+                .await;
+                let result = self.platform.input(&s.config.display_id, value).await;
+                self.trace(
+                    "display.remoteWriteCompleted",
+                    json!({"target":target,"monitor":s.config.display_id,"value":value,
+                        "commandAccepted":result.is_ok(),"pictureVerified":false,
+                        "error":result.as_ref().err().map(|e|e.to_string())}),
+                )
+                .await;
+                result?;
                 ensure!(self.current(link), "共享会话已结束");
-                Ok(json!(true))
+                Ok(json!({"monitor":s.config.display_id,"value":value,
+                    "commandAccepted":true,"pictureVerified":false}))
             }
             "land-pointer" => {
                 let _effects = self.effects.lock().await;
