@@ -564,10 +564,17 @@ pub fn run() {
             let runtime = match tauri::async_runtime::block_on(Runtime::new(app.path().app_data_dir()?, resource)) {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    app.dialog().message(format!("无法读取 应用配置或系统凭据：{error}\n旧版 Deskflow DDC 的数据未修改。"))
+                    // setup runs on the GUI thread. blocking_show here freezes
+                    // GTK before the event loop starts and hides the real error.
+                    // No input engine has started; keep only the error dialog
+                    // alive until acknowledgement, then exit without cleanup.
+                    eprintln!("Deskflow DDC 启动失败：{error:#}");
+                    let handle = app.handle().clone();
+                    app.dialog().message(format!("无法初始化应用配置或系统凭据：{error:#}\n请保留现有配置，并检查系统密钥环是否已解锁。"))
                         .title("Deskflow DDC 启动失败")
-                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).blocking_show();
-                    return Err(error.into());
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
                 }
             };
             app.manage(runtime.clone());
@@ -718,6 +725,11 @@ pub fn run() {
         .expect("无法启动 Deskflow DDC");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
+            // Initialization can fail before Runtime/ExitState are registered.
+            // Its error dialog must be able to exit without touching sharing.
+            if app.try_state::<Arc<Runtime>>().is_none() {
+                return;
+            }
             if !app.state::<ExitState>().ready() {
                 api.prevent_exit();
                 quit_from(app, "systemExit");

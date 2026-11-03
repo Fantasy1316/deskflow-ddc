@@ -1,7 +1,15 @@
 // Build the pinned Deskflow source against this Ubuntu baseline. Qt >= 6.7
 // must be installed first (CI uses Qt 6.8.3). Never reuse a newer distro's ELF.
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { join, basename } from 'node:path'
 
 export function prepareLinux({

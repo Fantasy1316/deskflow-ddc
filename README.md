@@ -224,11 +224,11 @@ pnpm pack:mac  # 在 macOS 上构建 .app
 
 ### Ubuntu 实验性构建与配置
 
-首个验证目标为 **Ubuntu 24.04 x86_64 + X11**，提供 `.deb`。Linux 核心也接受 ARM64 架构，但 ARM64 的完整包尚未验证；Apple Silicon 上的 Ubuntu ARM64 虚拟机不能代替 x86_64 安装包验证。
+适配目标为 **Ubuntu 24.04 x86_64 / ARM64 + X11**，提供 `.deb`。ARM64 已通过 GitHub Actions 原生构建、自动化测试及内置运行库检查；桌面交互与物理 DDC 尚未完成实机验证。Apple Silicon 上的 Ubuntu ARM64 虚拟机不能代替 x86_64 安装包验证。
 
 使用 `.github/workflows/ubuntu.yml` 可在 GitHub Actions 构建 Ubuntu 包，并在 Xvfb 虚拟显示器中执行输入桥读取测试。该流程不发布 Release，不测试真实输入捕获或物理 DDC。构建脚本从固定 SHA-256 的 Deskflow 1.27.0、libei 1.3.0 和 libportal 0.9.1 源码编译；Qt 固定为 6.8.3，附带动态运行库、对应 qtbase 源码和许可。不能直接复制较新 Ubuntu 的官方 Deskflow 二进制到 24.04。
 
-本地构建需先安装 Qt 6.8.3（包含 qtbase、Qt Widgets、Network、DBus 和 LinguistTools），将其 `bin` 加入 `PATH` 并设置 `CMAKE_PREFIX_PATH`。可用 Qt 安装器；x86_64 也可通过 `aqtinstall` 安装 `linux desktop 6.8.3 linux_gcc_64`。其他构建依赖及 apt 包列表以该工作流为准。然后运行：
+本地构建需先安装 Qt 6.8.3（包含 qtbase、Qt Widgets、Network、DBus 和 LinguistTools），将其 `bin` 加入 `PATH` 并设置 `CMAKE_PREFIX_PATH`。可用 Qt 安装器；也可通过 `aqtinstall` 安装：x86_64 使用 `linux desktop 6.8.3 linux_gcc_64`，ARM64 使用 `linux_arm64 desktop 6.8.3 linux_gcc_arm64`。其他构建依赖及 apt 包列表以该工作流为准。然后运行：
 
 ```sh
 pnpm install --frozen-lockfile
@@ -236,7 +236,15 @@ pnpm prepare:engine
 pnpm pack:linux
 ```
 
-安装 `.deb` 时使用 `sudo apt install ./实际文件名.deb`，由 apt 安装 ddcutil、WebKitGTK、托盘等系统运行依赖。应用和 Deskflow 均以当前用户运行，不要求 root。首次运行需在已登录且钥匙环解锁的桌面中进行。
+安装前需启用 Ubuntu 的 `universe` 软件源并更新索引；ddcutil、i2c-tools 及部分 Qt 运行依赖来自该仓库。首次安装可执行：
+
+```sh
+sudo add-apt-repository -y universe
+sudo apt update
+sudo apt install ./实际文件名.deb
+```
+
+apt 会安装 ddcutil、WebKitGTK、托盘等系统运行依赖。应用和 Deskflow 均以当前用户运行，不要求 root。首次运行需在已登录且钥匙环解锁的桌面中进行。
 
 显示器控制使用 Linux DRM / EDID 识别显示器，每次操作重新解析 I²C 总线；不保存临时总线号或 RandR 句柄。若没有显示器、无法读写 DDC 或提示权限不足，请先检查：
 
