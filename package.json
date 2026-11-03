@@ -1,0 +1,48 @@
+{
+  "name": "deskflow-ddc",
+  "version": "0.2.4",
+  "private": true,
+  "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite --host 127.0.0.1",
+    "typecheck": "vue-tsc --noEmit && vue-tsc -p tsconfig.node.json --noEmit",
+    "build": "pnpm build:web",
+    "test": "vitest run",
+    "build:native": "node scripts/build-native.mjs",
+    "pack:mac": "pnpm build:tauri --bundles app",
+    "pack:win": "pnpm build:tauri --bundles nsis",
+    "test:native": "node scripts/test-native.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "tauri": "tauri",
+    "build:tauri": "tauri build --no-binary-patching",
+    "build:web": "vue-tsc --noEmit && vite build",
+    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
+    "prepare:engine": "node scripts/prepare-engine.mjs",
+    "pack:linux": "pnpm build:tauri --bundles deb"
+  },
+  "dependencies": {
+    "vue": "^3.5.21",
+    "lucide-vue-next": "^0.468.0",
+    "zod": "^3.25.0",
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.0.6",
+    "prettier": "3.6.2",
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=11 <12"
+  },
+  "packageManager": "pnpm@11.8.0"
+}

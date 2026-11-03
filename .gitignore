@@ -1,0 +1,28 @@
+node_modules/
+.pnpm-store/
+dist/
+release/
+.native-cache/
+.DS_Store
+.workbuddy/
+
+# Generated native binaries
+resources/bin/
+
+# Local settings and diagnostic exports
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+*.jsonl
+settings.json
+settings.json.*.tmp
+
+# Tauri build and local engine payloads
+src-tauri/target/
+src-tauri/resources/
+src-tauri/gen/schemas/
+
+.engine-cache/

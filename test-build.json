@@ -1,0 +1,9 @@
+{
+  "productName": "Deskflow DDC Test",
+  "build": {
+    "beforeBuildCommand": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit && node node_modules/vite/bin/vite.js build",
+    "features": [
+      "custom-protocol"
+    ]
+  }
+}

@@ -1,0 +1,345 @@
+use crate::{
+    model::{Config, Pin},
+    protocol::{new_pairing, pairing_key},
+};
+use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Stored {
+    pub version: u32,
+    pub id: Uuid,
+    pub config: Config,
+    #[serde(default)]
+    pub startup: crate::startup::Preferences,
+    pub trusted_peer: Option<Pin>,
+    #[serde(default)]
+    pub last_verified_address: Option<std::net::IpAddr>,
+}
+pub struct Store {
+    pub directory: PathBuf,
+    pub value: Stored,
+    pub pairing: String,
+}
+fn decode_settings(bytes: &[u8]) -> Result<Stored> {
+    let mut value: Stored = serde_json::from_slice(bytes).context("配置损坏；未覆盖原文件")?;
+    ensure!([2, 3].contains(&value.version), "配置版本不支持");
+    value.config.validate()?;
+    if value.version == 2 {
+        // Apply the safer default once; preserve identity, pairing and layout.
+        value.config.cross_screen_video = "manual".into();
+        value.version = 3;
+    }
+    Ok(value)
+}
+fn prepare_identity(directory: &Path, value: &Stored) -> Result<()> {
+    if !directory.join("identity.pem").exists() {
+        ensure!(
+            value.trusted_peer.is_none() && value.last_verified_address.is_none(),
+            "已配对设备的引擎身份文件缺失，未生成新身份；请恢复应用配置备份"
+        );
+    }
+    crate::engine::identity(directory)?;
+    Ok(())
+}
+impl Store {
+    pub fn load(directory: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&directory)?;
+        let file = directory.join("settings.json");
+        let value = match fs::read(&file) {
+            Ok(bytes) => {
+                let value = decode_settings(&bytes)?;
+                let old: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if old["version"] == 2 {
+                    atomic_write(
+                        &directory.join(format!(
+                            "settings-before-manual-video-{}.json",
+                            Uuid::new_v4()
+                        )),
+                        &bytes,
+                    )?;
+                }
+                value
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stored {
+                version: 3,
+                startup: crate::startup::Preferences::default(),
+                id: Uuid::new_v4(),
+                config: Config::default(),
+                trusted_peer: None,
+                last_verified_address: None,
+            },
+            Err(e) => return Err(e.into()),
+        };
+        // Commit the engine identity before credentials/settings. A crash on the
+        // first launch can then be retried without leaving an unusable profile.
+        // Older interrupted, never-paired profiles can safely finish this step.
+        prepare_identity(&directory, &value)?;
+        let vault = keyring::Entry::new("app.deskflow-ddc.preview", &value.id.to_string())?;
+        let pairing = match vault.get_password() {
+            Ok(code) => {
+                pairing_key(&code)?;
+                code
+            }
+            Err(keyring::Error::NoEntry) => {
+                ensure!(!file.exists(), "配对密钥不可用；未生成新身份或覆盖旧配置");
+                let code = new_pairing();
+                vault.set_password(&code).context("无法保存系统配对凭据；Ubuntu 请确认已登录桌面且 GNOME Keyring / Secret Service 已解锁")?;
+                code
+            }
+            Err(e) => return Err(e).context("无法读取系统配对凭据"),
+        };
+        let s = Self {
+            directory,
+            value,
+            pairing,
+        };
+        s.save()?;
+        Ok(s)
+    }
+    pub fn save(&self) -> Result<()> {
+        self.value.config.validate()?;
+        atomic_write(
+            &self.directory.join("settings.json"),
+            &serde_json::to_vec_pretty(&self.value)?,
+        )
+    }
+    pub fn set_pairing(&mut self, code: String) -> Result<()> {
+        pairing_key(&code)?;
+        let vault = keyring::Entry::new("app.deskflow-ddc.preview", &self.value.id.to_string())?;
+        let previous = self.value.clone();
+        let old_code = self.pairing.clone();
+        vault.set_password(&code)?;
+        self.pairing = code;
+        self.value.trusted_peer = None;
+        self.value.last_verified_address = None;
+        if let Err(error) = self.save() {
+            self.value = previous;
+            self.pairing = old_code.clone();
+            vault
+                .set_password(&old_code)
+                .context("配置写入与配对凭据回滚均失败，请恢复配置备份")?;
+            return Err(error);
+        }
+        Ok(())
+    }
+    /// Read settings only. Electron safeStorage ciphertext is never treated as plaintext.
+    pub fn import_legacy_config(&mut self, file: &Path) -> Result<()> {
+        let bytes = fs::read(file)?;
+        ensure!(bytes.len() < 256 * 1024, "配置文件过大");
+        let disk: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let mut c: Config =
+            serde_json::from_value(disk["config"].clone()).context("旧配置格式无效")?;
+        c.validate()?;
+        c.cross_screen_video = "manual".into();
+        let backup = self
+            .directory
+            .join(format!("settings-before-import-{}.json", Uuid::new_v4()));
+        atomic_write(&backup, &serde_json::to_vec_pretty(&self.value)?)?;
+        let old = self.value.clone();
+        self.value.config = c;
+        self.value.trusted_peer = None;
+        self.value.last_verified_address = None;
+        if let Err(e) = self.save() {
+            self.value = old;
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("保存路径无效")?;
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".save-{}.tmp", Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(not(target_os = "windows"))]
+        fs::rename(&temp, path)?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn MoveFileExW(a: *const u16, b: *const u16, flags: u32) -> i32;
+            }
+            let a: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let b: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            ensure!(
+                unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0x1 | 0x8) } != 0,
+                "原子保存配置失败：{}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    })();
+    if temp.exists() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn unpaired() -> Stored {
+        Stored {
+            version: 3,
+            startup: crate::startup::Preferences::default(),
+            id: Uuid::new_v4(),
+            config: Config::default(),
+            trusted_peer: None,
+            last_verified_address: None,
+        }
+    }
+    #[test]
+    fn legacy_settings_keep_startup_opted_out() {
+        let mut old = serde_json::to_value(unpaired()).unwrap();
+        old.as_object_mut().unwrap().remove("startup");
+        let restored = decode_settings(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(restored.startup, crate::startup::Preferences::default());
+    }
+    #[test]
+    fn completes_old_interrupted_initialization_without_changing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = unpaired();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let settings = dir.path().join("settings.json");
+        // v0.2.0 could save these settings before writing the first certificate.
+        fs::write(&settings, &bytes).unwrap();
+        prepare_identity(dir.path(), &decode_settings(&bytes).unwrap()).unwrap();
+        let fingerprint = crate::engine::identity(dir.path()).unwrap();
+        prepare_identity(dir.path(), &value).unwrap();
+        assert_eq!(crate::engine::identity(dir.path()).unwrap(), fingerprint);
+        assert_eq!(fs::read(settings).unwrap(), bytes);
+    }
+    #[test]
+    fn identity_failure_can_retry_without_committing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity.pem");
+        fs::create_dir(&identity).unwrap();
+        let value = unpaired();
+        assert!(prepare_identity(dir.path(), &value).is_err());
+        assert!(!dir.path().join("settings.json").exists());
+        fs::remove_dir(identity).unwrap();
+        prepare_identity(dir.path(), &value).unwrap();
+        assert!(dir.path().join("identity.pem").is_file());
+        assert!(!dir.path().join("settings.json").exists());
+    }
+    #[test]
+    fn missing_identity_with_any_pairing_history_is_never_regenerated() {
+        for pinned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut value = unpaired();
+            if pinned {
+                value.trusted_peer = Some(Pin {
+                    id: Uuid::new_v4(),
+                    fingerprint: "a".repeat(64),
+                });
+            } else {
+                value.last_verified_address = Some("192.168.1.8".parse().unwrap());
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(dir.path().join("settings.json"), &bytes).unwrap();
+            assert!(prepare_identity(dir.path(), &value).is_err());
+            assert!(!dir.path().join("identity.pem").exists());
+            assert_eq!(fs::read(dir.path().join("settings.json")).unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn corrupt_existing_identity_is_preserved_even_when_unpaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity.pem");
+        fs::write(&identity, "incomplete certificate").unwrap();
+        assert!(prepare_identity(dir.path(), &unpaired()).is_err());
+        assert_eq!(
+            fs::read_to_string(identity).unwrap(),
+            "incomplete certificate"
+        );
+    }
+    #[test]
+    fn save_replaces_without_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        for i in 0..20 {
+            atomic_write(&p, format!("{{\"value\":{i}}}").as_bytes()).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+            assert_eq!(v["value"], i);
+        }
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    #[test]
+    fn legacy_import_never_writes_source_or_copies_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy.json");
+        let bytes = serde_json::to_vec(&serde_json::json!({"config":Config::default(),"secretEncrypted":true,"secret":"unreadable"})).unwrap();
+        fs::write(&legacy, &bytes).unwrap();
+        let mut store = Store {
+            directory: dir.path().join("new"),
+            value: Stored {
+                version: 3,
+                startup: crate::startup::Preferences::default(),
+                id: Uuid::new_v4(),
+                config: Config::default(),
+                trusted_peer: None,
+                last_verified_address: None,
+            },
+            pairing: new_pairing(),
+        };
+        store.import_legacy_config(&legacy).unwrap();
+        assert_eq!(fs::read(&legacy).unwrap(), bytes);
+        assert!(!fs::read_to_string(store.directory.join("settings.json"))
+            .unwrap()
+            .contains("unreadable"));
+    }
+    #[test]
+    fn migrates_preview_edge_policy_once_without_changing_identity_or_layout() {
+        for mode in ["follow", "keep"] {
+            let original = Stored {
+                version: 2,
+                startup: crate::startup::Preferences::default(),
+                id: Uuid::new_v4(),
+                config: Config {
+                    cross_screen_video: mode.into(),
+                    layout_side: "left".into(),
+                    retained_display_id: "internal".into(),
+                    ..Config::default()
+                },
+                trusted_peer: Some(Pin {
+                    id: Uuid::new_v4(),
+                    fingerprint: "a".repeat(64),
+                }),
+                last_verified_address: Some("192.168.1.8".parse().unwrap()),
+            };
+            let mut migrated = decode_settings(&serde_json::to_vec(&original).unwrap()).unwrap();
+            assert_eq!(migrated.version, 3);
+            assert_eq!(migrated.config.cross_screen_video, "manual");
+            assert_eq!(migrated.config.layout_side, "left");
+            assert_eq!(migrated.config.retained_display_id, "internal");
+            assert_eq!(migrated.id, original.id);
+            assert_eq!(migrated.trusted_peer, original.trusted_peer);
+            assert_eq!(
+                migrated.last_verified_address,
+                original.last_verified_address
+            );
+            migrated.config.cross_screen_video = mode.into();
+            let reloaded = decode_settings(&serde_json::to_vec(&migrated).unwrap()).unwrap();
+            assert_eq!(reloaded.config.cross_screen_video, mode);
+        }
+    }
+}

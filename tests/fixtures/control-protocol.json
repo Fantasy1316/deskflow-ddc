@@ -1,0 +1,21 @@
+{
+  "key": "0707070707070707070707070707070707070707070707070707070707070707",
+  "clientNonce": "0101010101010101010101010101010101010101010101010101010101010101",
+  "serverNonce": "0202020202020202020202020202020202020202020202020202020202020202",
+  "payload": {
+    "kind": "request",
+    "id": "1",
+    "method": "ping",
+    "payload": null
+  },
+  "frame": {
+    "seq": "0",
+    "data": "kjy6DoCgfM9JBot1iEc7xjKYYNLJbIzVcXHIOXOJRmbyXkdm2spH3Nulf2Aw+nN6/b7toOFa+4Prsg==",
+    "tag": "aajfMxVwDNZKfqfGcPIPNg=="
+  },
+  "rustFrame": {
+    "seq": "0",
+    "data": "kjy4A8z+fMRJWMxvlEwskCqWMN7cO9OENHHIOXOJRmbyXkdm2spH3Nulf2Aw+nN6/b7toOFa+4Prsg==",
+    "tag": "PiXtJUVoB1SWd+QhmE//1g=="
+  }
+}

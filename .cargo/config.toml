@@ -1,0 +1,4 @@
+# aes 0.8 / polyval 0.6 require opt-in for runtime-detected ARM acceleration.
+# Keep Windows/x86 builds portable; these flags apply only to Apple Silicon.
+[target.aarch64-apple-darwin]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
