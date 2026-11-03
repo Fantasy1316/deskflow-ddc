@@ -259,9 +259,22 @@ impl Runtime {
             platform() != "unsupported",
             "当前支持 macOS、Windows 和 Ubuntu Linux"
         );
-        let store = Store::load(directory.clone())?;
+        // Record progress before credentials are loaded: a first-run keyring
+        // failure must not leave an invisible process with no diagnostic file.
+        let mut diagnostics = Diagnostics::new(directory.join("logs"), String::new())?;
+        diagnostics.record("app.initializing", json!({"phase":"store"}))?;
+        let store = match Store::load(directory.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                let _ = diagnostics.record(
+                    "app.initializationFailed",
+                    json!({"phase":"store","error":format!("{error:#}")}),
+                );
+                return Err(error);
+            }
+        };
+        diagnostics.protect(store.pairing.clone());
         let fingerprint = engine::identity(&directory)?;
-        let diagnostics = Diagnostics::new(directory.join("logs"), store.pairing.clone())?;
         let state = Snapshot::new(&store, &diagnostics);
         let (updates, _) = watch::channel(state.clone());
         let (observed, _) = broadcast::channel(32);
