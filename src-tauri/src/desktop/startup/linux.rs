@@ -40,7 +40,9 @@ fn active(text: &str) -> bool {
 fn entry(executable: &Path) -> Result<String> {
     let value = executable.to_str().context("登录启动路径不是 UTF-8")?;
     ensure!(
-        executable.is_absolute() && !value.contains(['\r', '\n', '\0']),
+        // This serializes a Linux Desktop Entry, including in tests hosted on
+        // Windows where Path::is_absolute uses different filesystem rules.
+        value.starts_with('/') && !value.contains(['\r', '\n', '\0']),
         "登录启动路径无效"
     );
     let mut escaped = String::new();
@@ -98,5 +100,6 @@ mod tests {
         assert!(text.contains("Exec=\"/opt/Deskflow DDC/100%%/deskflow-ddc\" --autostart\n"));
         assert!(entry(Path::new("/opt/app\nHidden=true")).is_err());
         assert!(entry(Path::new("relative/app")).is_err());
+        assert!(entry(Path::new(r"C:\Program Files\deskflow-ddc.exe")).is_err());
     }
 }
