@@ -405,9 +405,9 @@ impl Runtime {
             s.display_status != "uncertain",
             "画面状态不确定，请手动恢复提供端画面后重新开始共享"
         );
-        if recovery.is_some() {
-            self.ensure_target_connected(link, &target).await?;
-        }
+        // An inactive input may not appear in the target's display enumeration.
+        // Send the chosen target through the current source instead of vetoing
+        // it on enumeration; recovery verifies the result with a fresh readback.
         self.command_pending.store(true, Ordering::Release);
         let result = async {
             self.keyboard_switch(link, target.clone(), None).await?;

@@ -136,36 +136,6 @@ impl Runtime {
         Ok(())
     }
 
-    pub(super) async fn ensure_target_connected(&self, link: &Link, target: &str) -> Result<()> {
-        let s = self.snapshot().await;
-        let result = if target == s.device_id {
-            self.platform.display_connected(&s.config.display_id).await
-        } else {
-            link.session
-                .request("display-connection", Value::Null, Duration::from_secs(10))
-                .await
-                .and_then(|value| Ok(serde_json::from_value::<bool>(value)?))
-        };
-        ensure!(self.current(link), "共享会话已结束");
-        match result {
-            Ok(true) => Ok(()),
-            Ok(false) => bail!("目标电脑尚未识别到共用显示器，视频连接可能仍在恢复，请稍后重试；本次未切换画面与键鼠"),
-            Err(error) => {
-                // Older peers have no presence RPC. A successful live DDC read
-                // still proves the configured monitor can be reached there.
-                if target != s.device_id {
-                    if let Ok(value) = link.session.request("get-input-source", Value::Null, Duration::from_secs(4)).await {
-                        let source = serde_json::from_value::<Option<String>>(value).ok().flatten();
-                        if self.current(link) && source.as_ref().is_some_and(|id| id == &s.device_id || s.peer.as_ref().is_some_and(|peer| id == &peer.id)) {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(error).context("暂时无法确认目标显示器连接是否恢复，请稍后重试；本次未切换画面与键鼠")
-            }
-        }
-    }
-
     pub(super) async fn confirm_resumed_switch(
         &self,
         link: &Link,
@@ -214,7 +184,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn resumed_toggle_uses_live_source_and_reports_unready_or_unapplied_target() {
+    async fn resumed_toggle_uses_live_source_even_when_target_is_not_enumerated() {
         use std::os::unix::fs::PermissionsExt;
         // Actual picture, whether writes take effect, target enumerated, readable.
         for (actual_local, apply, present, readable) in [
@@ -222,7 +192,11 @@ mod tests {
             (false, true, true, true),
             (false, false, true, true),
             (false, true, false, true),
+            (true, true, false, true),
+            (false, false, false, true),
+            (true, false, false, true),
             (false, true, true, false),
+            (false, true, false, false),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "host");
@@ -265,7 +239,7 @@ mod tests {
                 String::new()
             };
             std::fs::write(&helper, format!(
-                "#!/bin/sh\nif test \"$2\" = list; then echo '{list}'; exit 0; fi\nif test \"$3\" = get; then {} cat \"$0.source\"; exit 0; fi\nif test \"$3\" = set; then echo \"$5\" >> \"$0.called\"; {} exit 0; fi\nexit 9\n",
+                "#!/bin/sh\nif test \"$2\" = list; then touch \"$0.listed\"; echo '{list}'; exit 0; fi\nif test \"$3\" = get; then {} cat \"$0.source\"; exit 0; fi\nif test \"$3\" = set; then echo \"$5\" >> \"$0.called\"; {} exit 0; fi\nexit 9\n",
                 if readable { "" } else { "exit 1;" },
                 if apply { "echo \"$5\" > \"$0.source\";" } else { "" }
             )).unwrap();
@@ -303,7 +277,6 @@ mod tests {
                                 json!("receiver")
                             }
                         }
-                        "display-connection" => json!(present),
                         "set-input" => {
                             assert_eq!(payload, json!(expected));
                             remote_writes.fetch_add(1, Ordering::AcqRel);
@@ -327,23 +300,39 @@ mod tests {
             done.send(()).unwrap();
             receiver.await.unwrap().close();
             let state = runtime.snapshot().await;
-            if apply && present && readable {
+            // Inactive inputs may disappear from enumeration. A fresh source
+            // read, actual writes and readback decide the result in both directions.
+            assert!(!helper.with_extension("listed").exists());
+            if readable {
+                assert_eq!(writes.load(Ordering::Acquire), 1);
+                assert_eq!(
+                    std::fs::read_to_string(helper.with_extension("called"))
+                        .unwrap()
+                        .trim(),
+                    if actual_local { "1" } else { "3" }
+                );
+            }
+            if apply && readable {
                 result.unwrap();
                 assert_eq!(state.display_device_id, Some(target));
                 assert!(runtime.display_recovery.lock().await.pending().is_none());
-                assert_eq!(writes.load(Ordering::Acquire), 1);
             } else {
                 let error = result.unwrap_err().to_string();
                 assert!(runtime.display_recovery.lock().await.pending().is_some());
                 if !readable {
                     assert!(error.contains("无法读取当前输入源"), "{error}");
-                } else if !present {
-                    assert!(error.contains("尚未识别到共用显示器"), "{error}");
                 } else {
                     assert!(error.contains("尚未切到目标电脑"), "{error}");
-                    assert_eq!(state.display_device_id, Some("receiver".into()));
+                    assert_eq!(
+                        state.display_device_id,
+                        Some(if actual_local {
+                            local
+                        } else {
+                            "receiver".into()
+                        })
+                    );
                 }
-                if !present || !readable {
+                if !readable {
                     assert_eq!(writes.load(Ordering::Acquire), 0);
                     assert!(!helper.with_extension("called").exists());
                 }
