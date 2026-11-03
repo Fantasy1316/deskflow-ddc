@@ -41,7 +41,7 @@ jobs:
             libx11-dev libxrandr-dev libxtst-dev libxinerama-dev libxi-dev libxkbfile-dev libsm-dev libice-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libxkbregistry-dev libxcb-cursor-dev libxcb-icccm4-dev \
             libxcb-keysyms1-dev libxcb-image0-dev libxcb-render-util0-dev libxcb-xinerama0-dev \
-            libxcb-xkb-dev libegl1-mesa-dev libgl-dev libfontconfig1-dev libglib2.0-dev libevdev-dev \
+            libxcb-xkb-dev libxcb-shape0 libegl1-mesa-dev libgl-dev libfontconfig1-dev libglib2.0-dev libevdev-dev \
             python3-jinja2 python3-attr ddcutil i2c-tools gnome-keyring xvfb xauth
       - uses: pnpm/action-setup@v4
         with:
@@ -60,10 +60,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
       - uses: actions/cache@v4
         with:
           path: .engine-cache
           key: ubuntu-24.04-${{ matrix.arch }}-deskflow-1.27-qt6.8.3-${{ hashFiles('scripts/prepare-engine*.mjs') }}
+          restore-keys: ubuntu-24.04-${{ matrix.arch }}-deskflow-1.27-qt6.8.3-
       - run: pnpm install --frozen-lockfile
       - run: pnpm prepare:engine
       - run: pnpm typecheck

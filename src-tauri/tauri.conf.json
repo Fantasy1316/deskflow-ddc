@@ -70,6 +70,7 @@
           "libxcb-render-util0",
           "libxcb-xinerama0",
           "libxcb-xkb1",
+          "libxcb-shape0",
           "libegl1",
           "libgl1",
           "libfontconfig1",
