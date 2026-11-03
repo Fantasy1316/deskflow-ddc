@@ -154,7 +154,9 @@ export function prepareLinux({
       if (copied.has(name)) continue
       copied.add(name)
       const target = join(runtime, 'lib', name)
-      cpSync(path, target)
+      // ldd normally returns SONAME symlinks. Copy the bytes, never a link back
+      // into the build machine's Qt SDK or private dependency prefix.
+      cpSync(path, target, { dereference: true })
       pending.push(target)
       inventory.push(name)
     }
