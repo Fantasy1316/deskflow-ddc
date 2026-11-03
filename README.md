@@ -7,9 +7,20 @@
 
 Deskflow DDC 是适合两台电脑共用一块显示器的桌面应用。使用 **Rust + Tauri 2 + Vue 3**，内置 **Deskflow 1.27.0**，无需另行安装键鼠共享引擎。实体键鼠可以连接在任意一端，按提供端和接收端配置，不绑定操作系统。
 
-**0.2.5** · [下载安装包](https://github.com/Fantasy1316/deskflow-ddc/releases) · [更新说明](CHANGELOG.md) · [反馈问题](https://github.com/Fantasy1316/deskflow-ddc/issues)
+**0.2.5** · macOS / Windows 正式版 · **Ubuntu Beta** · [下载安装包](https://github.com/Fantasy1316/deskflow-ddc/releases/tag/v0.2.5) · [更新说明](CHANGELOG.md) · [反馈问题](https://github.com/Fantasy1316/deskflow-ddc/issues)
 
 这是独立项目，与 [Deskflow](https://github.com/deskflow/deskflow) 官方无隶属关系。
+
+## 下载 0.2.5
+
+| 系统               | 架构                  | 版本类型           | 下载                                                                                                                             |
+| ------------------ | --------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| macOS 14+          | Apple Silicon / ARM64 | 正式版             | [应用压缩包](https://github.com/Fantasy1316/deskflow-ddc/releases/download/v0.2.5/Deskflow-DDC-0.2.5-macos-arm64.zip)            |
+| Windows 10 / 11    | x64                   | 正式版             | [安装程序](https://github.com/Fantasy1316/deskflow-ddc/releases/download/v0.2.5/Deskflow-DDC-0.2.5-windows-x64-setup.exe)        |
+| Ubuntu 24.04 + X11 | Intel / AMD x64       | **Beta（实验性）** | [DEB 安装包](https://github.com/Fantasy1316/deskflow-ddc/releases/download/v0.2.5/Deskflow-DDC-0.2.5-ubuntu24.04-x64-beta.deb)   |
+| Ubuntu 24.04 + X11 | ARM64                 | **Beta（实验性）** | [DEB 安装包](https://github.com/Fantasy1316/deskflow-ddc/releases/download/v0.2.5/Deskflow-DDC-0.2.5-ubuntu24.04-arm64-beta.deb) |
+
+Ubuntu Beta 的适配范围与限制见 [Ubuntu Beta](#ubuntu-beta)。两个 Ubuntu 架构均通过自动构建与测试，真实双机共享和物理显示器兼容性仍待验证。完整共享请将两端同时升级到 0.2.5，使用 Windows 安全桌面服务时需更新已安装服务。
 
 ## Windows 锁屏与密码界面
 
@@ -39,16 +50,16 @@ Deskflow DDC 是适合两台电脑共用一块显示器的桌面应用。使用 
 
 ## 系统与硬件要求
 
-| 项目             | 要求                                                                           |
-| ---------------- | ------------------------------------------------------------------------------ |
-| macOS            | Apple Silicon，macOS 14 或更新版本；暂不支持 Intel Mac 的 DDC 控制             |
-| Windows          | Windows 10 / 11 x64，需要 Microsoft Edge WebView2 Runtime                      |
-| Ubuntu（实验性） | Ubuntu 24.04 x86_64 / ARM64；完整共享仅支持 X11，需已解锁的默认系统密钥环      |
-| 显示器           | 开启 DDC/CI，并支持通过 VCP `0x60` 切换输入源                                  |
-| 接线             | 两台电脑分别连接共用显示器的不同输入接口                                       |
-| 网络             | 完整共享需要两台电脑网络互通；仅切换显示器无需网络，完整共享允许控制与键鼠端口 |
+| 项目                  | 要求                                                                           |
+| --------------------- | ------------------------------------------------------------------------------ |
+| macOS                 | Apple Silicon，macOS 14 或更新版本；暂不支持 Intel Mac 的 DDC 控制             |
+| Windows               | Windows 10 / 11 x64，需要 Microsoft Edge WebView2 Runtime                      |
+| Ubuntu Beta（实验性） | Ubuntu 24.04 x86_64 / ARM64；完整共享仅支持 X11，需已解锁的默认系统密钥环      |
+| 显示器                | 开启 DDC/CI，并支持通过 VCP `0x60` 切换输入源                                  |
+| 接线                  | 两台电脑分别连接共用显示器的不同输入接口                                       |
+| 网络                  | 完整共享需要两台电脑网络互通；仅切换显示器无需网络，完整共享允许控制与键鼠端口 |
 
-**Ubuntu 支持从 0.2.5 起作为实验功能提供**，可作为键鼠提供端或接收端，与同版本 Ubuntu、Windows 或 Mac 配对。目标为 Ubuntu 24.04 x86_64 / ARM64 + X11；Wayland / XWayland 暂不支持完整键鼠共享。ARM64 虚拟机已验证应用可启动，双机键鼠、物理 DDC、热插拔、睡眠恢复及登录自启仍需实机验证，不应视为与 macOS / Windows 同等成熟。Ubuntu 不支持锁屏密码界面控制，虚拟显示器通常没有真实 DDC/I²C 通道。安装与配置见下方 [Ubuntu（实验性）](#ubuntu实验性)。
+**Ubuntu 从 0.2.5 起以 Beta（实验性）提供**，可作为键鼠提供端或接收端，与同版本 Ubuntu、Windows 或 Mac 配对。目标为 Ubuntu 24.04 x86_64 / ARM64 + X11；Wayland / XWayland 暂不支持完整键鼠共享。ARM64 虚拟机已验证应用可启动，双机键鼠、物理 DDC、热插拔、睡眠恢复及登录自启仍需实机验证，不应视为与 macOS / Windows 同等成熟。Ubuntu 不支持锁屏密码界面控制，虚拟显示器通常没有真实 DDC/I²C 通道。安装与配置见下方 [Ubuntu Beta](#ubuntu-beta)。
 
 支持范围内的两台 Windows、两台 Mac 或 Windows / Mac 混合均按相同角色配置。显示器、扩展坞、转接器和线材会影响 DDC/CI；使用前请分别确认两端都能发送输入切换指令。
 
@@ -211,9 +222,9 @@ mDNS 通常只在同一子网有效。跨子网、访客 Wi-Fi、客户端隔离
 - 当前支持一对一共享，不提供远程桌面视频、USB 转发或自动唤醒。
 - 锁屏、UAC 安全桌面、睡眠恢复及不同 DPI 的跨屏行为受操作系统和引擎限制。
 
-## Ubuntu（实验性）
+## Ubuntu Beta
 
-目标系统为 **Ubuntu 24.04 x86_64 / ARM64 + X11**，安装格式为 `.deb`。ARM64 虚拟机已确认能够打开应用；实际键鼠共享和物理显示器切换仍需验证。安装包是否可用以 [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases) 为准。
+Ubuntu 安装包为 **Beta（实验性）**，目标系统为 **Ubuntu 24.04 x86_64 / ARM64 + X11**，安装格式为 `.deb`。请按架构下载文件名带 `beta` 的安装包。ARM64 虚拟机已确认能够打开应用；实际键鼠共享和物理显示器切换仍需验证，暂不建议用于需要稳定输入控制的关键工作环境。
 
 ### 安装与桌面会话
 
