@@ -30,6 +30,10 @@ export function prepareLinux({
   }
   const run = (tool, args, options = {}) =>
     execFileSync(tool, args, { env, stdio: 'inherit', ...options })
+  // Meson generators need the distro's python3-attr/python3-jinja2 packages.
+  // Qt installers may prepend a different Python without those modules.
+  const meson = (args) =>
+    run('/usr/bin/meson', args, { env: { ...env, PATH: `/usr/bin:${env.PATH}` } })
   const dependencies = [
     {
       name: 'libei',
@@ -66,7 +70,7 @@ export function prepareLinux({
     if (!existsSync(dir)) run('tar', ['-xzf', archive, '-C', buildRoot])
     const build = join(buildRoot, `${dep.name}-build`)
     if (!existsSync(join(build, 'build.ninja')))
-      run('meson', [
+      meson([
         'setup',
         build,
         dir,
@@ -78,8 +82,8 @@ export function prepareLinux({
         'release',
         ...dep.options,
       ])
-    run('meson', ['compile', '-C', build])
-    run('meson', ['install', '-C', build])
+    meson(['compile', '-C', build])
+    meson(['install', '-C', build])
     cpSync(archive, join(payload, `${dep.name}-${dep.version}-source.tar.gz`))
     for (const file of readdirSync(dir))
       if (/^(LICENSE|COPYING)/.test(file))
