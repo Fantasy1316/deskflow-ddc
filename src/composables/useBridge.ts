@@ -76,6 +76,8 @@ export function useBridge() {
       } else {
         await window.screenbridge.act(action)
         if (action.type === 'save') notify('设置已保存')
+        if (action.type === 'saveStartup') notify('启动设置已保存，下次启动应用时生效')
+        if (action.type === 'checkStartup') notify('登录启动项检测已完成')
         if (action.type === 'copyPairing') notify('配对码已复制')
         if (action.type === 'checkAccessibility') notify('权限检测已完成')
         if (action.type === 'installWindowsService')

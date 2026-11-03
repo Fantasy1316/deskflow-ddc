@@ -24,7 +24,7 @@ const displayedMapping = computed({
       <span class="section-icon"><AppIcon name="keyboard" /></span>
       <div>
         <h2>跨系统修饰键映射</h2>
-        <p>统一 Mac 与 Windows 的常用编辑快捷键，仅作用于发往接收端的键盘输入。</p>
+        <p>统一 Mac 与 Windows / Linux 的常用编辑快捷键，仅作用于发往接收端的键盘输入。</p>
       </div>
     </div>
     <div v-if="!isHost" class="inline-info">
@@ -40,10 +40,11 @@ const displayedMapping = computed({
       </select>
     </label>
     <div v-if="displayedMapping === 'common'" class="inline-info">
-      Mac 提供键鼠：Command → Ctrl，Control → Win。Windows 提供键鼠：Ctrl → Command，Win → Control。
-      例如在 Mac 键盘上按 Command + C / V，可在 Windows 中复制 / 粘贴。
+      Mac 提供键鼠：Command → Ctrl，Control → Win / Super。Windows 提供键鼠：Ctrl → Command，Win →
+      Control；Linux 提供键鼠：Ctrl → Command，Super → Control。 例如在 Mac 键盘上按 Command + C /
+      V，可在 Windows / Linux 中复制 / 粘贴。
     </div>
-    <p v-else>跨系统时保留 Command ↔ Win、Control ↔ Ctrl 的原始对应关系。</p>
+    <p v-else>跨系统时保留 Command ↔ Win / Super、Control ↔ Ctrl 的原始对应关系。</p>
     <p>
       同系统共享及本机操作保持原样。开启后会交换所有相关组合键；应用切换等组合不同的快捷键仍按目标系统规则使用。
       请先停止共享，修改并保存后重新开始共享。

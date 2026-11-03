@@ -5,6 +5,8 @@ import SettingsLock from './SettingsLock.vue'
 import PointerSettings from './PointerSettings.vue'
 import ModifierSettings from './ModifierSettings.vue'
 import WindowsServiceSettings from './WindowsServiceSettings.vue'
+import LinuxSupport from './LinuxSupport.vue'
+import StartupSettings from './StartupSettings.vue'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import type { Action, Snapshot } from '../shared/types'
 const props = defineProps<{ state: Snapshot; busy: boolean; checkingAccessibility: boolean }>()
@@ -40,6 +42,8 @@ const label = (value: string) =>
         <p>共享方式由你决定，键鼠可以连接在任意一端。</p>
       </div>
     </div>
+    <StartupSettings :state="state" :busy="busy" @action="emit('action', $event)" />
+    <LinuxSupport :state="state" :busy="busy" @action="emit('action', $event)" />
     <SettingsLock v-if="state.running" :busy="busy" @stop="emit('action', { type: 'stop' })" />
     <form @submit.prevent="emit('action', { type: 'save', config: value() })">
       <div class="panel">
@@ -235,7 +239,11 @@ const label = (value: string) =>
           <strong>显示器控制组件</strong>
           <p>
             {{
-              state.platform === 'win32' ? 'Windows DXVA2 / DDC/CI' : 'Apple Silicon 原生 DDC/CI'
+              state.platform === 'linux'
+                ? 'Linux ddcutil / I²C / DDC/CI'
+                : state.platform === 'win32'
+                  ? 'Windows DXVA2 / DDC/CI'
+                  : 'Apple Silicon 原生 DDC/CI'
             }}
           </p>
         </div>

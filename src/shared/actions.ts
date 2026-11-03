@@ -2,6 +2,12 @@ import { z } from 'zod'
 import { configSchema } from './config.js'
 
 export const actionSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('saveStartup'),
+      settings: z.object({ launchAtLogin: z.boolean(), autoShare: z.boolean() }).strict(),
+    })
+    .strict(),
   z.object({ type: z.literal('save'), config: configSchema }).strict(),
   z.object({ type: z.literal('start'), pairingCode: z.string().max(128).optional() }).strict(),
   z.object({ type: z.literal('switch'), target: z.enum(['local', 'peer']) }).strict(),
@@ -12,6 +18,7 @@ export const actionSchema = z.discriminatedUnion('type', [
       'installWindowsService',
       'removeWindowsService',
       'checkWindowsService',
+      'checkStartup',
       'scan',
       'discover',
       'importLegacyConfig',

@@ -1,11 +1,21 @@
 import type { Action, Config, Snapshot } from './types'
 
+export function platformLabel(platform: string): string {
+  return (
+    ({ darwin: 'macOS', win32: 'Windows', linux: 'Ubuntu / Linux' } as Record<string, string>)[
+      platform
+    ] ?? '浏览器预览'
+  )
+}
+
 export type ActionRunner = (action: Action) => Promise<boolean>
 export interface ActionFailure {
   action: Action['type'] | 'snapshot' | 'runtime'
   message: string
 }
 export const actionLabels: Partial<Record<ActionFailure['action'], string>> = {
+  saveStartup: '保存启动设置',
+  checkStartup: '检测登录启动项',
   save: '保存设置',
   start: '建立共享连接',
   switch: '切换画面与键鼠',

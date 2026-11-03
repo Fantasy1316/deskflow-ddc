@@ -202,7 +202,68 @@ pub fn cursor() -> Result<Point> {
         })
     }
 }
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub fn cursor() -> Result<Point> {
+    use std::ffi::c_void;
+    #[link(name = "X11")]
+    unsafe extern "C" {
+        fn XOpenDisplay(name: *const i8) -> *mut c_void;
+        fn XDefaultRootWindow(display: *mut c_void) -> libc::c_ulong;
+        fn XQueryPointer(
+            display: *mut c_void,
+            window: libc::c_ulong,
+            root: *mut libc::c_ulong,
+            child: *mut libc::c_ulong,
+            root_x: *mut i32,
+            root_y: *mut i32,
+            win_x: *mut i32,
+            win_y: *mut i32,
+            mask: *mut u32,
+        ) -> i32;
+        fn XCloseDisplay(display: *mut c_void) -> i32;
+    }
+    // Reuse one connection per polling thread. No process spawn at 60 Hz and
+    // no shared Xlib connection across Tokio threads.
+    struct Connection(*mut c_void);
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            unsafe {
+                XCloseDisplay(self.0);
+            }
+        }
+    }
+    thread_local! { static DISPLAY: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) }; }
+    crate::linux::ensure_x11()?;
+    DISPLAY.with(|connection| -> Result<Point> {
+        let mut connection = connection.borrow_mut();
+        if connection.is_none() {
+            let display = unsafe { XOpenDisplay(std::ptr::null()) };
+            ensure!(!display.is_null(), "无法读取 X11 鼠标位置");
+            *connection = Some(Connection(display));
+        }
+        let display = connection.as_ref().unwrap().0;
+        let (mut root, mut child, mut x, mut y, mut wx, mut wy, mut mask) = (0, 0, 0, 0, 0, 0, 0);
+        let ok = unsafe {
+            XQueryPointer(
+                display,
+                XDefaultRootWindow(display),
+                &mut root,
+                &mut child,
+                &mut x,
+                &mut y,
+                &mut wx,
+                &mut wy,
+                &mut mask,
+            )
+        };
+        ensure!(ok != 0, "无法读取当前 X11 屏幕的鼠标位置");
+        Ok(Point {
+            x: x as f64,
+            y: y as f64,
+        })
+    })
+}
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn cursor() -> Result<Point> {
     anyhow::bail!("不支持的系统")
 }

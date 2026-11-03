@@ -1,6 +1,6 @@
 {
   "name": "deskflow-ddc",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Share a monitor, keyboard and mouse across two computers with Deskflow and DDC/CI.",
   "type": "module",
@@ -20,7 +20,8 @@
     "build:tauri": "tauri build --no-binary-patching",
     "build:web": "vue-tsc --noEmit && vite build",
     "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib",
-    "prepare:engine": "node scripts/prepare-engine.mjs"
+    "prepare:engine": "node scripts/prepare-engine.mjs",
+    "pack:linux": "pnpm build:tauri --bundles deb"
   },
   "dependencies": {
     "vue": "^3.5.21",

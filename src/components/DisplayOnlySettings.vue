@@ -2,10 +2,11 @@
 import { computed } from 'vue'
 import type { Action, Snapshot } from '../shared/types'
 import { useConfigDraft } from '../composables/useConfigDraft'
+import LinuxSupport from './LinuxSupport.vue'
 import AppIcon from './AppIcon.vue'
 import SettingsLock from './SettingsLock.vue'
 const props = defineProps<{ state: Snapshot; busy: boolean }>()
-defineEmits<{ action: [action: Action] }>()
+const emit = defineEmits<{ action: [action: Action] }>()
 const { draft, value } = useConfigDraft(() => props.state.config)
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
 const locked = computed(() => props.busy || props.state.running)
@@ -28,6 +29,7 @@ const label = (key: string) =>
     .replaceAll('+', ' + ')
 </script>
 <template>
+  <LinuxSupport :state="state" :busy="busy" @action="emit('action', $event)" />
   <section>
     <div class="page-heading">
       <div>

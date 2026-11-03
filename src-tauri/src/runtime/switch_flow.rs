@@ -385,9 +385,14 @@ impl Runtime {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("正在切换，请稍后"))?;
         ensure!(self.current(link), "共享会话已结束");
+        let recovery = self.display_recovery.lock().await.pending();
+        if let Some(token) = recovery {
+            let _effects = self.effects.lock().await;
+            self.prepare_resumed_switch(link, token).await?;
+        }
         let s = self.snapshot().await;
         // Resolve toggles at the provider using the last picture command,
-        // independently of keyboard ownership or unverified VCP read replies.
+        // except after resume, when a fresh DDC observation is required above.
         let target = match target {
             Some(target) => target,
             None if s.display_device_id.as_ref() == Some(&s.device_id) => {
@@ -400,6 +405,9 @@ impl Runtime {
             s.display_status != "uncertain",
             "画面状态不确定，请手动恢复提供端画面后重新开始共享"
         );
+        if recovery.is_some() {
+            self.ensure_target_connected(link, &target).await?;
+        }
         self.command_pending.store(true, Ordering::Release);
         let result = async {
             self.keyboard_switch(link, target.clone(), None).await?;
@@ -411,7 +419,13 @@ impl Runtime {
             );
             self.inner.lock().await.state.switching = true;
             self.publish_control(link, None).await;
-            let result = self.write_display_with_retry(link, &target).await;
+            let result = match self.write_display_with_retry(link, &target).await {
+                Ok(()) => match recovery {
+                    Some(token) => self.confirm_resumed_switch(link, token, &target).await,
+                    None => Ok(()),
+                },
+                Err(error) => Err(error),
+            };
             if result.is_err() && self.current(link) {
                 if let Some(from) = &s.active_device_id {
                     if from != &target {

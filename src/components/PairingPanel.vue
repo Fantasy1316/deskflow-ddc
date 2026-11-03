@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { platformLabel } from '../shared/workspace'
 import { computed, shallowRef } from 'vue'
 import AppIcon from './AppIcon.vue'
 import DeviceDiscovery from './DeviceDiscovery.vue'
@@ -221,7 +222,7 @@ async function connectDevices() {
         <div>
           <strong>{{ state.peer.name }}</strong
           ><small
-            >{{ state.peer.platform === 'darwin' ? 'macOS' : 'Windows' }} ·
+            >{{ platformLabel(state.peer.platform) }} ·
             {{ state.connected ? '控制连接已认证' : '当前离线' }}</small
           >
         </div>

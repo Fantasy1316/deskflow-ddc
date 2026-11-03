@@ -142,20 +142,38 @@ impl Platform {
         match platform() {
             "darwin" => self.resources.join("native/bin/m1ddc").is_file(),
             "win32" => self.resources.join("native/monitor.ps1").is_file(),
+            "linux" => crate::linux::ddcutil().is_some(),
             _ => false,
         }
     }
+    fn input_helper(&self) -> PathBuf {
+        self.resources.join(if platform() == "linux" {
+            "native/bin/linux-input"
+        } else {
+            "native/bin/mac-hotkey"
+        })
+    }
     pub async fn accessibility(&self) -> bool {
+        if platform() == "linux" {
+            return crate::linux::ensure_x11().is_ok()
+                && self
+                    .run(
+                        self.resources.join("native/bin/linux-input"),
+                        &["check".into()],
+                    )
+                    .await
+                    .is_ok_and(|s| s == "true");
+        }
         platform() == "win32"
             || self
-                .run(
-                    self.resources.join("native/bin/mac-hotkey"),
-                    &["check".into()],
-                )
+                .run(self.input_helper(), &["check".into()])
                 .await
                 .is_ok_and(|s| s == "true")
     }
     pub async fn list(&self) -> Result<Value> {
+        if platform() == "linux" {
+            return self.linux_list().await;
+        }
         if platform() == "win32" {
             let v = self.win("list", serde_json::json!({})).await?;
             return Ok(if v.is_array() {
@@ -194,7 +212,42 @@ impl Platform {
         }
         Ok(monitors.into())
     }
+    // Enumeration proves OS/device presence, not that a visible video signal
+    // has completed link training or that the monitor is showing that input.
+    pub async fn display_connected(&self, id: &str) -> Result<bool> {
+        let monitors = if platform() == "linux" {
+            Value::Array(
+                crate::linux::displays()?
+                    .into_iter()
+                    .map(|d| serde_json::json!({"id":d.id}))
+                    .collect(),
+            )
+        } else if platform() == "win32" {
+            self.win("list", serde_json::json!({})).await?
+        } else {
+            let output = self
+                .run(
+                    self.resources.join("native/bin/m1ddc"),
+                    &["display".into(), "list".into()],
+                )
+                .await?;
+            Value::Array(parse_mac_displays(&output))
+        };
+        let matches = |monitor: &Value| {
+            monitor["id"]
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(id))
+        };
+        Ok(match &monitors {
+            Value::Array(monitors) => monitors.iter().any(matches),
+            Value::Object(_) => matches(&monitors),
+            _ => false,
+        })
+    }
     pub async fn input(&self, id: &str, value: u16) -> Result<()> {
+        if platform() == "linux" {
+            return self.linux_input(id, value).await;
+        }
         ensure!(
             !id.is_empty() && !id.contains(['\n', '\r', '\0']),
             "显示器标识无效"
@@ -218,6 +271,9 @@ impl Platform {
         Ok(())
     }
     pub async fn current_input(&self, id: &str) -> Result<Option<u16>> {
+        if platform() == "linux" {
+            return self.linux_current_input(id).await;
+        }
         ensure!(
             !id.is_empty() && !id.contains(['\n', '\r', '\0']),
             "显示器标识无效"
@@ -243,11 +299,7 @@ impl Platform {
         if platform() == "win32" {
             self.win(target, serde_json::json!({})).await?;
         } else {
-            self.run(
-                self.resources.join("native/bin/mac-hotkey"),
-                &[target.into()],
-            )
-            .await?;
+            self.run(self.input_helper(), &[target.into()]).await?;
         }
         Ok(())
     }
@@ -261,7 +313,7 @@ impl Platform {
             .await?;
         } else {
             self.run(
-                self.resources.join("native/bin/mac-hotkey"),
+                self.input_helper(),
                 &["pointer".into(), x.to_string(), y.to_string()],
             )
             .await?;
@@ -273,12 +325,7 @@ impl Platform {
             self.win("screens", serde_json::json!({})).await
         } else {
             Ok(serde_json::from_str(
-                &self
-                    .run(
-                        self.resources.join("native/bin/mac-hotkey"),
-                        &["screens".into()],
-                    )
-                    .await?,
+                &self.run(self.input_helper(), &["screens".into()]).await?,
             )?)
         }
     }

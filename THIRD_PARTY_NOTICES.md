@@ -6,9 +6,15 @@ The Apple Silicon DDC helper is built from [waydabber/m1ddc](https://github.com/
 
 ## Deskflow
 
-[Deskflow](https://github.com/deskflow/deskflow) 1.27.0 is bundled as a separate, unmodified `deskflow-core` process, with its official runtime dependencies. It is not linked into the Rust application. The runtime is prepared from official release assets verified with pinned SHA-256 digests. Its corresponding source at commit `081f6478e654a112168879e67a41ce7d7e4ae3af` and license texts are shipped in `resources/deskflow/` inside each application. This project is independent of the Deskflow maintainers.
+[Deskflow](https://github.com/deskflow/deskflow) 1.27.0 is bundled as a separate, unmodified `deskflow-core` process, with its official runtime dependencies. It is not linked into the Rust application. The macOS/Windows runtime is prepared from official release assets verified with pinned SHA-256 digests. Experimental Ubuntu builds compile the same pinned source on the target Ubuntu baseline. Its corresponding source at commit `081f6478e654a112168879e67a41ce7d7e4ae3af` and license texts are shipped in `resources/deskflow/` inside each application. This project is independent of the Deskflow maintainers.
 
 Deskflow uses GPL-2.0-only WITH LicenseRef-OpenSSL-Exception. Its Qt, OpenSSL, Microsoft runtime and other dependencies retain their respective licenses. The preparation script preserves the complete upstream runtime directory, including DLLs/frameworks and any provided notices. See the bundled source archive and `resources/deskflow/licenses/` for Deskflow notices. Original MIT application code does not replace third-party licenses.
+
+## Ubuntu runtime
+
+Ubuntu uses system `ddcutil` (GPL-2.0-or-later) to send DDC/CI commands as a separate process; it is installed by the package manager, not embedded into the Rust executable. The X11 input bridge is original MIT code using the system Xlib, RandR and XTest libraries.
+
+The Linux engine preparation script builds libei 1.3.0 and libportal 0.9.1 from SHA-256 pinned upstream archives and bundles their shared libraries, corresponding source archives and license files. Qt 6.8.3 is dynamically linked; the corresponding qtbase source archive and license texts are shipped alongside the runtime. Distribution-provided libraries are installed as Debian dependencies. Linux uses WebKitGTK for its WebView and Secret Service for persistent pairing credentials.
 
 ## Rust and Tauri dependencies
 

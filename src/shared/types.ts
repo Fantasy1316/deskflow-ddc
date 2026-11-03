@@ -2,6 +2,10 @@ export type Role = 'host' | 'client'
 export type ScreenSide = 'left' | 'right' | 'top' | 'bottom'
 export type ModifierMapping = 'original' | 'common'
 export type OperationMode = 'sharing' | 'display-only'
+export interface StartupPreferences {
+  launchAtLogin: boolean
+  autoShare: boolean
+}
 export interface Config {
   mode: OperationMode
   deviceName: string
@@ -64,6 +68,8 @@ export interface DiscoveredDevice {
   port: number
 }
 export interface Snapshot {
+  startup?: StartupPreferences
+  startupRegistered?: boolean | null
   revision?: number
   hostname?: string
   windowsService?: { installed: boolean; current: boolean }

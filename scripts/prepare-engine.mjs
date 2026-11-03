@@ -1,3 +1,4 @@
+import { prepareLinux } from './prepare-engine-linux.mjs'
 import { execFileSync } from 'node:child_process'
 import {
   cpSync,
@@ -21,8 +22,14 @@ function argument(name, fallback) {
 }
 const platform = argument('--platform', process.platform)
 const arch = argument('--arch', process.arch)
-if (!((platform === 'darwin' && arch === 'arm64') || (platform === 'win32' && arch === 'x64'))) {
-  throw new Error('Deskflow DDC currently packages Apple Silicon macOS and Windows x64.')
+if (
+  !(
+    (platform === 'darwin' && arch === 'arm64') ||
+    (platform === 'win32' && arch === 'x64') ||
+    (platform === 'linux' && ['x64', 'arm64'].includes(arch))
+  )
+) {
+  throw new Error('Supported engine targets: macOS arm64, Windows x64, Ubuntu x64/arm64.')
 }
 const cache = resolve(argument('--cache', join(root, '.engine-cache')))
 const destination = resolve(argument('--dest', join(root, 'src-tauri/resources')))
@@ -70,16 +77,22 @@ function download(name, url, expected) {
   rmSync(pending)
   return target
 }
+const source = download(
+  `deskflow-${version}-source.tar.gz`,
+  `https://codeload.github.com/deskflow/deskflow/tar.gz/${sourceRevision}`,
+  'd2a7b6686deda74095f5a8fe88826d4cdd5554f5e0a5362eec3e654098aa4191',
+)
+if (platform === 'linux') {
+  if (arch !== process.arch)
+    throw new Error('Linux engine must be built on the target architecture')
+  prepareLinux({ root, cache, destination, source, sourceRevision, version, digest, download })
+  process.exit(0)
+}
 const asset = assets[platform]
 const archive = download(
   asset.name,
   `https://github.com/deskflow/deskflow/releases/download/v${version}/${asset.name}`,
   asset.sha256,
-)
-const source = download(
-  `deskflow-${version}-source.tar.gz`,
-  `https://codeload.github.com/deskflow/deskflow/tar.gz/${sourceRevision}`,
-  'd2a7b6686deda74095f5a8fe88826d4cdd5554f5e0a5362eec3e654098aa4191',
 )
 const staging = mkdtempSync(join(tmpdir(), 'ddc-engine-'))
 const target = join(destination, 'deskflow')

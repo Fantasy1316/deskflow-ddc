@@ -576,13 +576,24 @@ fn corrupt_journal_does_not_prevent_application_startup() {
 async fn insufficient_space_fails_before_receiving_file_contents() {
     let source = tempfile::tempdir().unwrap();
     let dest = tempfile::tempdir().unwrap();
-    let file = source.path().join("too-large.bin");
     let available = disk::available(dest.path()).unwrap();
-    std::fs::File::create(&file)
-        .unwrap()
-        .set_len(available + 2 * 1024 * 1024)
-        .unwrap();
-    let manifest = manifest::scan(vec![file], &CancellationToken::new()).unwrap();
+    // Only the advertised manifest is needed: the receiver must reject it
+    // before requesting content. Extending a real file beyond free space fails
+    // on Windows, where set_len does not automatically create a sparse file.
+    let entry = manifest::Entry {
+        path: "too-large.bin".into(),
+        directory: false,
+        size: available + 2 * 1024 * 1024,
+        modified: "0".into(),
+    };
+    let manifest = manifest::Manifest {
+        bytes: manifest::validate(std::slice::from_ref(&entry)).unwrap(),
+        hash: manifest::hash(std::slice::from_ref(&entry)).unwrap(),
+        sources: vec![manifest::Source {
+            source: source.path().join(&entry.path),
+            entry,
+        }],
+    };
     let record = receiver_record(&manifest, Uuid::new_v4(), dest.path().into());
     let (_, received) = exchange(
         manifest,
@@ -641,64 +652,6 @@ async fn authenticated_keepalives_are_ignored_before_the_next_data_frame() {
     assert_eq!(wire.receive().await.unwrap(), b"next data");
     assert!(server.await.unwrap().sent_bytes >= 9);
     assert!(wire.metrics.snapshot().received_bytes >= 9);
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "manual release-mode throughput diagnostic; writes 128 MiB"]
-async fn full_pipeline_throughput_diagnostic() {
-    let source = tempfile::tempdir().unwrap();
-    let destination = tempfile::tempdir().unwrap();
-    let file = source.path().join("throughput.bin");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&file).unwrap();
-        let bytes: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
-        for _ in 0..128 {
-            f.write_all(&bytes).unwrap();
-        }
-    }
-    let a = tempfile::tempdir().unwrap();
-    let b = tempfile::tempdir().unwrap();
-    let sender = Manager::new(a.path().into()).unwrap();
-    let receiver = Manager::new(b.path().into()).unwrap();
-    let peer = Uuid::new_v4();
-    let id = sender
-        .prepare(vec![file], peer, "peer".into())
-        .await
-        .unwrap();
-    let invite = sender
-        .offer(id, peer, "127.0.0.1".parse().unwrap())
-        .await
-        .unwrap();
-    receiver
-        .incoming(invite, "127.0.0.1".parse().unwrap(), peer, "peer".into())
-        .unwrap();
-    let start = std::time::Instant::now();
-    receiver
-        .accept(id, Some(destination.path().into()))
-        .await
-        .unwrap();
-    wait_status(&receiver, id, "complete").await;
-    wait_status(&sender, id, "complete").await;
-    let seconds = start.elapsed().as_secs_f64();
-    println!(
-        "128 MiB full encrypted loopback + SHA256 + sync: {seconds:.3}s, {:.1} MiB/s",
-        128.0 / seconds
-    );
-    let sent = sender.snapshot();
-    let received = receiver.snapshot();
-    println!(
-        "sender: {}",
-        serde_json::to_string(&sent[0].performance).unwrap()
-    );
-    println!(
-        "receiver: {}",
-        serde_json::to_string(&received[0].performance).unwrap()
-    );
-    assert!(sent[0].performance.sent_bytes >= 128 * 1024 * 1024);
-    assert!(received[0].performance.received_bytes >= 128 * 1024 * 1024);
-    sender.shutdown().await;
-    receiver.shutdown().await;
 }
 
 #[tokio::test]

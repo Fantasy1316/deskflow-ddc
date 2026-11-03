@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { platformLabel } from './shared/workspace'
 import { computed, ref, shallowRef, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import appIcon from './assets/app-icon.png'
@@ -110,16 +111,7 @@ const on = computed(() =>
           <span class="device-avatar"><AppIcon name="laptop" :size="20" /></span>
           <div>
             <strong>{{ state.config.deviceName }}</strong
-            ><small
-              >{{
-                state.platform === 'darwin'
-                  ? 'macOS'
-                  : state.platform === 'win32'
-                    ? 'Windows'
-                    : '浏览器预览'
-              }}
-              · 本机</small
-            >
+            ><small>{{ platformLabel(state.platform) }} · 本机</small>
           </div>
         </div>
         <div class="version">

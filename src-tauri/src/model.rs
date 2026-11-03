@@ -6,6 +6,8 @@ pub fn platform() -> &'static str {
         "darwin"
     } else if cfg!(target_os = "windows") {
         "win32"
+    } else if cfg!(target_os = "linux") {
+        "linux"
     } else {
         "unsupported"
     }
@@ -20,7 +22,8 @@ pub enum ModifierMapping {
 impl ModifierMapping {
     pub fn swaps_between(self, source: &str, target: &str) -> bool {
         self == Self::Common
-            && matches!((source, target), ("darwin", "win32") | ("win32", "darwin"))
+            && ((source == "darwin" && matches!(target, "win32" | "linux"))
+                || (target == "darwin" && matches!(source, "win32" | "linux")))
     }
     pub fn receiver_shortcut(self, shortcut: &str, source: &str, target: &str) -> String {
         if !self.swaps_between(source, target) {
@@ -167,7 +170,10 @@ impl Config {
             !self.display_id.is_empty() && self.local_input.is_some() && self.peer_input.is_some(),
             "请先配置显示器和两端输入源"
         );
-        ensure!(platform() != "unsupported", "当前仅支持 macOS 和 Windows");
+        ensure!(
+            platform() != "unsupported",
+            "当前支持 macOS、Windows 和 Ubuntu Linux"
+        );
         ensure!(
             !(platform() == "win32"
                 && (self.role == "host" || self.mode == OperationMode::DisplayOnly)
@@ -226,7 +232,7 @@ impl Identity {
             if self.app_version.is_empty() { "旧版，未提供版本号" } else { &self.app_version }
         );
         ensure!(
-            ["darwin", "win32"].contains(&self.platform.as_str())
+            ["darwin", "win32", "linux"].contains(&self.platform.as_str())
                 && ["host", "client"].contains(&self.role.as_str()),
             "对端平台或角色无效"
         );
@@ -293,7 +299,12 @@ mod tests {
     }
     #[test]
     fn receiver_registers_the_translated_video_shortcut_in_both_directions() {
-        for (source, target) in [("darwin", "win32"), ("win32", "darwin")] {
+        for (source, target) in [
+            ("darwin", "win32"),
+            ("win32", "darwin"),
+            ("darwin", "linux"),
+            ("linux", "darwin"),
+        ] {
             assert_eq!(
                 ModifierMapping::Common.receiver_shortcut("control+alt+shift+F10", source, target),
                 "super+alt+shift+F10"
@@ -303,12 +314,17 @@ mod tests {
                 "control+alt+F10"
             );
         }
-        for system in ["darwin", "win32"] {
+        for system in ["darwin", "win32", "linux"] {
             assert_eq!(
                 ModifierMapping::Common.receiver_shortcut("control+alt+F10", system, system),
                 "control+alt+F10"
             );
         }
+    }
+    #[test]
+    fn windows_and_linux_keep_control_and_super_even_in_common_mode() {
+        assert!(!ModifierMapping::Common.swaps_between("win32", "linux"));
+        assert!(!ModifierMapping::Common.swaps_between("linux", "win32"));
     }
     #[test]
     fn rejects_injection_and_collision() {

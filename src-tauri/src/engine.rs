@@ -101,10 +101,11 @@ pub fn server_config(c: &Config, local: &str, peer: &str, peer_retained: bool) -
     if c.cross_screen_video != "manual" && (edges.is_none() || c.cross_screen_video != "keep") {
         text += &format!("\tkeystroke({}) = switchToNextScreen\n", chord(&c.shortcut));
     }
+    let (to_host, to_peer) = transfer_shortcuts(crate::model::platform());
     for (key, target) in [
         ("control+alt+Escape", host),
-        ("control+alt+shift+F18", host),
-        ("control+alt+shift+F19", client),
+        (to_host, host),
+        (to_peer, client),
     ] {
         text += &format!(
             "\tkeystroke({}) = switchToScreen(sb-{target})\n",
@@ -113,6 +114,15 @@ pub fn server_config(c: &Config, local: &str, peer: &str, peer_retained: bool) -
     }
     text += "end\n";
     Ok(text)
+}
+fn transfer_shortcuts(platform: &str) -> (&'static str, &'static str) {
+    if platform == "linux" {
+        // F18/F19 are often absent from standard XKB maps. The extra Super
+        // modifier keeps these internal chords distinct from user shortcuts.
+        ("control+alt+super+shift+F7", "control+alt+super+shift+F8")
+    } else {
+        ("control+alt+shift+F18", "control+alt+shift+F19")
+    }
 }
 fn computer_settings(c: &Config, local: &str, peer: &Identity, local_platform: &str) -> String {
     let (host, client, mode) = if c.role == "host" {
@@ -173,9 +183,9 @@ pub fn namespace(dir: &Path) -> PathBuf {
         &hex::encode(Sha256::digest(dir.to_string_lossy().as_bytes()))[..16]
     ))
 }
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 struct SessionNamespace(PathBuf);
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl SessionNamespace {
     fn create(root: &Path) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
@@ -197,7 +207,7 @@ impl SessionNamespace {
         bail!("无法分配独立的引擎临时目录")
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl Drop for SessionNamespace {
     fn drop(&mut self) {
         // Only this launch's freshly created directory is removed, after its
@@ -234,7 +244,7 @@ async fn preflight(path: &Path) -> Result<()> {
 pub async fn assert_no_running_engine(dir: &Path) -> Result<()> {
     let root = std::env::temp_dir();
     let mut paths = vec![root.join("deskflow-core")];
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         paths.push(namespace(dir).join("deskflow-core"));
         // Deleted/replaced .app bundles can leave an engine in the data tree.
@@ -243,14 +253,16 @@ pub async fn assert_no_running_engine(dir: &Path) -> Result<()> {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if entry.file_type()?.is_dir()
-                && (name.starts_with("sb-core-") || name.starts_with("ddc-core-"))
+            use std::os::unix::fs::MetadataExt;
+            if (name.starts_with("sb-core-") || name.starts_with("ddc-core-"))
+                && entry.file_type()?.is_dir()
+                && entry.metadata()?.uid() == unsafe { libc::getuid() }
             {
                 paths.push(entry.path().join("deskflow-core"));
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     let _ = dir;
     paths.sort();
     paths.dedup();
@@ -274,14 +286,14 @@ impl Engine {
         events: mpsc::Sender<Event>,
     ) -> Result<Self> {
         assert_no_running_engine(dir).await?;
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let session_namespace = SessionNamespace::create(&std::env::temp_dir())?;
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let temp = &session_namespace.0;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(unix))]
         let temp = namespace(dir);
         std::fs::create_dir_all(&temp)?;
-        let ipc = if cfg!(target_os = "macos") {
+        let ipc = if cfg!(unix) {
             temp.join("deskflow-core")
         } else {
             std::env::temp_dir().join("deskflow-core")
@@ -302,7 +314,7 @@ impl Engine {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if cfg!(target_os = "macos") {
+        if cfg!(unix) {
             command.env("TMPDIR", format!("{}/", temp.display()));
         }
         command
@@ -310,6 +322,17 @@ impl Engine {
             .env("XDG_STATE_HOME", dir.join("isolated-state"));
         #[cfg(windows)]
         command.creation_flags(0x08000000);
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux::ensure_x11()?;
+            // Never leave an input-grabbing core alive after an abrupt app exit.
+            // Check the parent again after arming PDEATHSIG to close the fork race.
+            let owner = std::process::id();
+            unsafe {
+                command.pre_exec(move || crate::linux::arm_parent_death_signal(owner));
+            }
+            command.env("QT_QPA_PLATFORM", "xcb");
+        }
         let mut child = command.spawn().context("无法启动内置键鼠引擎")?;
         let pid = child.id().context("无法获取键鼠引擎进程 ID")?;
         #[cfg(target_os = "macos")]
@@ -388,7 +411,7 @@ impl Engine {
             ipc_task.abort();
             #[cfg(target_os = "macos")]
             guardian.finish().await;
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             drop(session_namespace);
             // Deliver the exit event even under backpressure, independently of
             // the completed child/guardian cleanup awaited by application quit.
@@ -414,6 +437,11 @@ impl Engine {
             for _ in 0..72 {
                 match connect_ipc(&ipc).await {
                     Ok(socket) => {
+                        #[cfg(target_os = "linux")]
+                        if socket.peer_cred().ok().and_then(|cred| cred.pid()) != Some(_pid as i32)
+                        {
+                            break;
+                        }
                         #[cfg(windows)]
                         {
                             use std::os::windows::io::AsRawHandle;
@@ -580,11 +608,25 @@ mod tests {
     }
 
     #[test]
+    fn linux_transfer_chords_use_standard_keys_and_cannot_overlap_user_shortcuts() {
+        let (host, peer) = transfer_shortcuts("linux");
+        assert_eq!(host, "control+alt+super+shift+F7");
+        assert_eq!(peer, "control+alt+super+shift+F8");
+        for chord in [host, peer] {
+            let config = Config {
+                shortcut: chord.into(),
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+        }
+        assert_eq!(transfer_shortcuts("win32").0, "control+alt+shift+F18");
+    }
+    #[test]
     fn modifier_mapping_is_host_owned_and_only_changes_cross_system_receiver() {
         let local = uuid::Uuid::new_v4().to_string();
         for role in ["host", "client"] {
-            for local_platform in ["darwin", "win32"] {
-                for remote_platform in ["darwin", "win32"] {
+            for local_platform in ["darwin", "win32", "linux"] {
+                for remote_platform in ["darwin", "win32", "linux"] {
                     for mode in [ModifierMapping::Original, ModifierMapping::Common] {
                         let other = if mode == ModifierMapping::Common {
                             ModifierMapping::Original
@@ -609,8 +651,7 @@ mod tests {
                         let host = &sections[&format!("computer_sb-{host}")];
                         assert_eq!(host.len(), 1); // Local keys are never remapped.
                         let client = &sections[&format!("computer_sb-{client}")];
-                        let swapped =
-                            mode == ModifierMapping::Common && local_platform != remote_platform;
+                        let swapped = mode.swaps_between(local_platform, remote_platform);
                         assert_eq!(
                             client["modifierCtrl"],
                             if swapped { "super" } else { "ctrl" }
@@ -669,7 +710,7 @@ mod tests {
         assert_eq!(namespace(Path::new("/a")), namespace(Path::new("/a")));
         assert_ne!(namespace(Path::new("/a")), namespace(Path::new("/b")));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn session_namespace_is_fresh_private_and_cleans_only_its_own_files() {
         use std::os::unix::fs::PermissionsExt;
@@ -760,9 +801,23 @@ mod process_tests {
         let (mut socket, _) = server.accept().await.unwrap();
         let mut received = [0; 32];
         assert_eq!(socket.read(&mut received).await.unwrap(), 0);
+        drop(socket);
         drop(server);
         // A stale socket file is not evidence that an engine is alive.
-        assert!(preflight(&path).await.is_ok());
+        // Allow bounded teardown time on macOS while other tests spawn
+        // processes. Keep the stale socket path and preflight's live-engine
+        // rejection intact.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match preflight(&path).await {
+                    Ok(()) => break,
+                    Err(e) => assert!(e.to_string().contains("仍在运行"), "{e:#}"),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped listener must stop accepting connections");
     }
     #[tokio::test]
     async fn escalates_only_owned_child_and_reaps_it() {

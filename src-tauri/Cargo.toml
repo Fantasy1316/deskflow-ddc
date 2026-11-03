@@ -1,6 +1,6 @@
 [package]
 name = "deskflow-ddc-tauri"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 default-run = "deskflow-ddc"
 rust-version = "1.90"
@@ -15,13 +15,14 @@ crate-type = ["rlib"]
 [features]
 default = ["desktop"]
 custom-protocol = ["tauri/custom-protocol"]
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-clipboard-manager", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-single-instance"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener", "dep:tauri-plugin-clipboard-manager", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-autostart"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
+tauri-plugin-autostart = { version = "2", optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,5 +68,9 @@ strip = true
 opt-level = "s"
 lto = "thin"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "async-io", "crypto-rust"] }
+
 [target.'cfg(windows)'.dependencies]
+windows-registry = "0.6.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Services", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_System_RemoteDesktop", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Com"] }

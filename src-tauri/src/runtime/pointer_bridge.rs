@@ -49,6 +49,15 @@ impl Runtime {
                     _ = this.shutdown.cancelled() => break,
                     _ = interval.tick() => {}
                 }
+                if this
+                    .display_recovery
+                    .lock()
+                    .await
+                    .observe(std::time::SystemTime::now())
+                {
+                    this.trace("display.resumeDetected", json!({"pictureVerified":false}))
+                        .await;
+                }
                 // Sampling never clones the log history or starts a subprocess.
                 let (running, selected) = {
                     let i = this.inner.lock().await;
@@ -77,6 +86,7 @@ impl Runtime {
                     let rt = this.clone();
                     tokio::spawn(async move {
                         let _ = rt.refresh_topology().await;
+                        rt.refresh_display_after_resume().await;
                         rt.topology_busy.store(false, Ordering::Release);
                     });
                 }
@@ -150,6 +160,7 @@ impl Runtime {
                 .await;
             }
         } else if !was_ready {
+            self.display_recovery.lock().await.mark();
             self.log("info", "独立屏幕已恢复，正在自动重连").await;
         }
     }
@@ -181,6 +192,7 @@ pub(super) mod tests {
             directory: directory.into(),
             value: crate::store::Stored {
                 version: 3,
+                startup: crate::startup::Preferences::default(),
                 id: uuid::Uuid::new_v4(),
                 config: Config {
                     role: role.into(),
@@ -223,6 +235,7 @@ pub(super) mod tests {
             pointer_busy: AtomicBool::new(false),
             topology_busy: AtomicBool::new(false),
             topology_ready: watch::channel(true).0,
+            display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
             link: Mutex::new(None),
             engine: Mutex::new(None),
             actions: Mutex::new(()),
@@ -251,7 +264,9 @@ pub(super) mod tests {
         }]
     }
 
-    async fn attach_with_requests(runtime: &Runtime) -> (Session, mpsc::Receiver<Incoming>) {
+    pub(in crate::runtime) async fn attach_with_requests(
+        runtime: &Runtime,
+    ) -> (Session, mpsc::Receiver<Incoming>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

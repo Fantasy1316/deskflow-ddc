@@ -5,8 +5,11 @@ pub mod engine;
 pub mod engine_guard;
 pub mod model;
 pub mod platform;
+// Pure parsers also compile on other hosts for fixture tests.
+pub mod linux;
 pub mod pointer;
 pub mod protocol;
+pub mod startup;
 pub mod store;
 
 pub mod runtime;

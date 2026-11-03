@@ -1,0 +1,91 @@
+name: Ubuntu experimental build
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main', 'upgrade/tauri-v0.2']
+    tags: ['v0.2.*']
+  pull_request:
+    paths:
+      [
+        'src/**',
+        'src-tauri/**',
+        'native/linux/**',
+        'scripts/**',
+        'tests/**',
+        'package.json',
+        'pnpm-lock.yaml',
+        '.github/workflows/ubuntu.yml',
+      ]
+permissions:
+  contents: read
+jobs:
+  ubuntu:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            qt-host: linux
+            qt-arch: linux_gcc_64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            qt-host: linux_arm64
+            qt-arch: linux_gcc_arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install desktop and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build meson pkg-config curl patchelf \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev \
+            libx11-dev libxrandr-dev libxtst-dev libxinerama-dev libxi-dev libxkbfile-dev libsm-dev libice-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxkbregistry-dev libxcb-cursor-dev libxcb-icccm4-dev \
+            libxcb-keysyms1-dev libxcb-image0-dev libxcb-render-util0-dev libxcb-xinerama0-dev \
+            libxcb-xkb-dev libxcb-shape0 libegl1-mesa-dev libgl-dev libfontconfig1-dev libglib2.0-dev libevdev-dev \
+            python3-jinja2 python3-attr ddcutil i2c-tools gnome-keyring xvfb xauth
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: ${{ matrix.qt-host }}
+          arch: ${{ matrix.qt-arch }}
+          cache: true
+          install-deps: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        with:
+          path: .engine-cache
+          key: ubuntu-24.04-${{ matrix.arch }}-deskflow-1.27-qt6.8.3-${{ hashFiles('scripts/prepare-engine*.mjs') }}
+          restore-keys: ubuntu-24.04-${{ matrix.arch }}-deskflow-1.27-qt6.8.3-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prepare:engine
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Native bridge on a virtual display
+        run: xvfb-run -a node scripts/test-linux-native.mjs
+      - name: Rust and engine smoke tests
+        run: |
+          xvfb-run -a cargo test --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test bundled_runtime -- --ignored
+      - name: Build Ubuntu package
+        run: pnpm pack:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskflow-ddc-ubuntu-24.04-${{ matrix.arch }}-experimental
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 7

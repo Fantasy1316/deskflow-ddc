@@ -1,6 +1,29 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
+if (process.platform === 'linux') {
+  mkdirSync('resources/bin', { recursive: true })
+  execFileSync(
+    'cc',
+    [
+      '-std=c11',
+      '-O2',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      'native/linux/input.c',
+      '-o',
+      'resources/bin/linux-input',
+      '-lX11',
+      '-lXrandr',
+      '-lXtst',
+      '-lcrypto',
+    ],
+    { stdio: 'inherit' },
+  )
+  console.log('Ubuntu X11 screen/input bridge compiled.')
+  process.exit(0)
+}
 if (process.platform !== 'darwin') {
   console.log('Windows 使用随附的原生 DXVA2 PowerShell 桥，无需编译。')
   process.exit(0)

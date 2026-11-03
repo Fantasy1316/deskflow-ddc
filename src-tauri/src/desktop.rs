@@ -23,6 +23,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 mod file_drop;
 mod files;
+mod startup;
 
 #[derive(Default)]
 struct ExitState(AtomicU8);
@@ -74,6 +75,10 @@ fn install_dock_quit(app: &tauri::AppHandle) -> Result<()> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Action {
+    SaveStartup {
+        settings: crate::startup::Preferences,
+    },
+    CheckStartup {},
     Save {
         config: Config,
     },
@@ -169,6 +174,8 @@ async fn pick(app: &tauri::AppHandle, save: bool) -> Result<Option<std::path::Pa
 }
 async fn dispatch(app: &tauri::AppHandle, runtime: &Arc<Runtime>, action: Action) -> Result<()> {
     match action {
+        Action::SaveStartup { settings } => startup::save(app, runtime, settings).await,
+        Action::CheckStartup {} => startup::refresh(app, runtime).await,
         Action::Save { config } => runtime.save(config).await,
         Action::Start { pairing_code } => runtime.start(pairing_code).await,
         Action::Switch { target } => {
@@ -539,7 +546,10 @@ fn sync_lock_shortcut(app: tauri::AppHandle, runtime: Arc<Runtime>) {
 }
 pub fn run() {
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if !args.iter().any(|argument| argument == "--autostart") { show(app); }
+        }))
+        .plugin(tauri_plugin_autostart::Builder::new().app_name("Deskflow DDC").arg("--autostart").build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -554,10 +564,17 @@ pub fn run() {
             let runtime = match tauri::async_runtime::block_on(Runtime::new(app.path().app_data_dir()?, resource)) {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    app.dialog().message(format!("无法读取 应用配置或系统凭据：{error}\n旧版 Deskflow DDC 的数据未修改。"))
+                    // setup runs on the GUI thread. blocking_show here freezes
+                    // GTK before the event loop starts and hides the real error.
+                    // No input engine has started; keep only the error dialog
+                    // alive until acknowledgement, then exit without cleanup.
+                    eprintln!("Deskflow DDC 启动失败：{error:#}");
+                    let handle = app.handle().clone();
+                    app.dialog().message(format!("无法初始化应用配置或系统凭据：{error:#}\n请保留现有配置，并检查系统密钥环是否已解锁。"))
                         .title("Deskflow DDC 启动失败")
-                        .kind(tauri_plugin_dialog::MessageDialogKind::Error).blocking_show();
-                    return Err(error.into());
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
                 }
             };
             app.manage(runtime.clone());
@@ -629,7 +646,7 @@ pub fn run() {
                 .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Deskflow DDC")
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(cfg!(target_os = "linux"))
                 .on_tray_icon_event(|tray, event| {
                     if matches!(
                         event,
@@ -674,8 +691,10 @@ pub fn run() {
                     }
                     tauri::WindowEvent::Focused(true) => {
                         let rt = rt.clone();
+                        let app = handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let _ = rt.check_accessibility().await;
+                            let _ = startup::refresh(&app, &rt).await;
                         });
                     }
                     _ => {}
@@ -687,17 +706,30 @@ pub fn run() {
                 while updates.changed().await.is_ok() {
                     let snapshot = updates.borrow_and_update().clone();
                     controls.sync(&snapshot);
+                    if let Some(tray) = handle.tray_by_id("main-tray") {
+                        let status = if snapshot.engine == "ready" { "共享中" }
+                            else if snapshot.running { "等待连接" }
+                            else if snapshot.last_error.is_some() { "需要处理" }
+                            else { "已停止" };
+                        let _ = tray.set_tooltip(Some(format!("Deskflow DDC · {status}")));
+                    }
                     let _ = handle.emit_to("main", "bridge-state", snapshot);
                 }
             });
             sync_shortcuts(app.handle().clone(), runtime.clone());
-            sync_lock_shortcut(app.handle().clone(), runtime);
+            sync_lock_shortcut(app.handle().clone(), runtime.clone());
+            startup::initialize(app.handle().clone(), runtime, has_tray);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("无法启动 Deskflow DDC");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
+            // Initialization can fail before Runtime/ExitState are registered.
+            // Its error dialog must be able to exit without touching sharing.
+            if app.try_state::<Arc<Runtime>>().is_none() {
+                return;
+            }
             if !app.state::<ExitState>().ready() {
                 api.prevent_exit();
                 quit_from(app, "systemExit");

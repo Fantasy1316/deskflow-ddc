@@ -510,6 +510,15 @@ impl Runtime {
                 ensure!(self.current(link), "共享会话已结束");
                 Ok(json!(source))
             }
+            "display-connection" => {
+                let s = self.snapshot().await;
+                let connected = self
+                    .platform
+                    .display_connected(&s.config.display_id)
+                    .await?;
+                ensure!(self.current(link), "共享会话已结束");
+                Ok(json!(connected))
+            }
             "toggle" => {
                 ensure!(
                     self.snapshot().await.config.role == "host",

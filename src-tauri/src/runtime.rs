@@ -1,7 +1,9 @@
 mod control;
 mod display_only;
+mod display_recovery;
 mod engine_session;
 mod pointer_bridge;
+mod startup;
 mod switch_flow;
 mod system_control;
 
@@ -64,6 +66,8 @@ pub struct Log {
 pub struct Snapshot {
     pub revision: u64,
     pub config: Config,
+    pub startup: crate::startup::Preferences,
+    pub startup_registered: Option<bool>,
     pub device_id: String,
     pub platform: String,
     pub hostname: String,
@@ -100,6 +104,8 @@ impl Snapshot {
         Self {
             revision: 0,
             config: store.value.config.clone(),
+            startup: store.value.startup.clone(),
+            startup_registered: None,
             device_id: store.value.id.to_string(),
             platform: platform().into(),
             hostname: format!("ddc-{}.local", store.value.id),
@@ -234,6 +240,7 @@ pub struct Runtime {
     pointer_busy: AtomicBool,
     topology_busy: AtomicBool,
     topology_ready: watch::Sender<bool>,
+    display_recovery: Mutex<display_recovery::DisplayRecovery>,
     link: Mutex<Option<Arc<Link>>>,
     engine: Mutex<Option<Engine>>,
     pub actions: Mutex<()>,
@@ -248,10 +255,26 @@ pub struct Runtime {
 }
 impl Runtime {
     pub async fn new(directory: PathBuf, resources: PathBuf) -> Result<Arc<Self>> {
-        ensure!(platform() != "unsupported", "当前仅支持 macOS 和 Windows");
-        let store = Store::load(directory.clone())?;
+        ensure!(
+            platform() != "unsupported",
+            "当前支持 macOS、Windows 和 Ubuntu Linux"
+        );
+        // Record progress before credentials are loaded: a first-run keyring
+        // failure must not leave an invisible process with no diagnostic file.
+        let mut diagnostics = Diagnostics::new(directory.join("logs"), String::new())?;
+        diagnostics.record("app.initializing", json!({"phase":"store"}))?;
+        let store = match Store::load(directory.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                let _ = diagnostics.record(
+                    "app.initializationFailed",
+                    json!({"phase":"store","error":format!("{error:#}")}),
+                );
+                return Err(error);
+            }
+        };
+        diagnostics.protect(store.pairing.clone());
         let fingerprint = engine::identity(&directory)?;
-        let diagnostics = Diagnostics::new(directory.join("logs"), store.pairing.clone())?;
         let state = Snapshot::new(&store, &diagnostics);
         let (updates, _) = watch::channel(state.clone());
         let (observed, _) = broadcast::channel(32);
@@ -278,6 +301,7 @@ impl Runtime {
             pointer_busy: AtomicBool::new(false),
             topology_busy: AtomicBool::new(false),
             topology_ready: watch::channel(true).0,
+            display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
             link: Mutex::new(None),
             engine: Mutex::new(None),
             actions: Mutex::new(()),
@@ -619,6 +643,8 @@ impl Runtime {
             json!({"version":env!("CARGO_PKG_VERSION")}),
         )
         .await;
+        #[cfg(target_os = "linux")]
+        crate::linux::ensure_x11()?;
         engine::assert_no_running_engine(&self.directory).await?;
         self.refresh().await?;
         let state = self.snapshot().await;
@@ -936,12 +962,35 @@ pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Ident
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn initialization_failure_is_logged_before_settings_are_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let invalid = b"{invalid settings";
+        std::fs::write(&settings, invalid).unwrap();
+        let result = Runtime::new(dir.path().into(), dir.path().join("resources")).await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(settings).unwrap(), invalid);
+        let log = std::fs::read_to_string(dir.path().join("logs/deskflow-ddc.jsonl")).unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events[0]["event"], "app.initializing");
+        assert_eq!(events[1]["event"], "app.initializationFailed");
+        assert_eq!(events[1]["details"]["phase"], "store");
+        assert!(events[1]["details"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("配置损坏"));
+    }
     pub(super) fn snapshot() -> Snapshot {
         let dir = tempfile::tempdir().unwrap();
         let store = Store {
             directory: dir.path().into(),
             value: crate::store::Stored {
                 version: 3,
+                startup: crate::startup::Preferences::default(),
                 id: uuid::Uuid::new_v4(),
                 config: Config::default(),
                 trusted_peer: Some(Pin {

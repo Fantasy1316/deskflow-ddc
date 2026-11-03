@@ -17,6 +17,8 @@ pub struct Stored {
     pub version: u32,
     pub id: Uuid,
     pub config: Config,
+    #[serde(default)]
+    pub startup: crate::startup::Preferences,
     pub trusted_peer: Option<Pin>,
     #[serde(default)]
     pub last_verified_address: Option<std::net::IpAddr>,
@@ -68,6 +70,7 @@ impl Store {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stored {
                 version: 3,
+                startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config::default(),
                 trusted_peer: None,
@@ -88,7 +91,7 @@ impl Store {
             Err(keyring::Error::NoEntry) => {
                 ensure!(!file.exists(), "配对密钥不可用；未生成新身份或覆盖旧配置");
                 let code = new_pairing();
-                vault.set_password(&code).context("无法保存系统配对凭据")?;
+                vault.set_password(&code).context("无法保存系统配对凭据；Ubuntu 请确认已登录桌面且 GNOME Keyring / Secret Service 已解锁")?;
                 code
             }
             Err(e) => return Err(e).context("无法读取系统配对凭据"),
@@ -197,11 +200,19 @@ mod tests {
     fn unpaired() -> Stored {
         Stored {
             version: 3,
+            startup: crate::startup::Preferences::default(),
             id: Uuid::new_v4(),
             config: Config::default(),
             trusted_peer: None,
             last_verified_address: None,
         }
+    }
+    #[test]
+    fn legacy_settings_keep_startup_opted_out() {
+        let mut old = serde_json::to_value(unpaired()).unwrap();
+        old.as_object_mut().unwrap().remove("startup");
+        let restored = decode_settings(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(restored.startup, crate::startup::Preferences::default());
     }
     #[test]
     fn completes_old_interrupted_initialization_without_changing_settings() {
@@ -282,6 +293,7 @@ mod tests {
             directory: dir.path().join("new"),
             value: Stored {
                 version: 3,
+                startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config::default(),
                 trusted_peer: None,
@@ -300,6 +312,7 @@ mod tests {
         for mode in ["follow", "keep"] {
             let original = Stored {
                 version: 2,
+                startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config {
                     cross_screen_video: mode.into(),
