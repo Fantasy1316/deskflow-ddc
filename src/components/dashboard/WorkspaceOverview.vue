@@ -11,7 +11,13 @@ const ready = computed(() =>
     ? props.state.running && displayMappingValid(props.state.config)
     : props.state.connected && props.state.engine === 'ready',
 )
-const disabled = computed(() => !ready.value || props.busy || props.state.switching)
+const disabled = computed(
+  () =>
+    !ready.value ||
+    props.busy ||
+    props.state.switching ||
+    props.state.displaySource?.kind === 'checking',
+)
 const activeName = computed(() =>
   props.state.activeDeviceId
     ? deviceName(props.state, props.state.activeDeviceId)
@@ -34,6 +40,9 @@ const peerActionLabel = computed(() =>
 )
 const monitorName = computed(
   () =>
+    (props.state.config.displayMethod === 'signal'
+      ? props.state.outputDisplays?.find((m) => m.id === props.state.config.outputId)?.name
+      : undefined) ||
     props.state.monitors.find((m) => m.id === props.state.config.displayId)?.name ||
     (props.state.config.displayId ? '已配置的显示器' : '等待选择显示器'),
 )
@@ -78,7 +87,14 @@ const connectionLabel = computed(() =>
           {{
             displayOnly ? '仅控制输入源' : state.config.role === 'host' ? '提供键鼠' : '接收键鼠'
           }}</small
-        ><span class="input-badge">输入源 {{ state.config.localInput ?? '待配置' }}</span>
+        ><span class="input-badge"
+          >输入源
+          {{
+            state.config.displayMethod === 'signal'
+              ? '自动选源'
+              : (state.config.localInput ?? '待配置')
+          }}</span
+        >
       </div>
       <div class="connection-line" aria-hidden="true">
         <span></span><AppIcon name="switch" :size="18" /><span></span>
@@ -91,7 +107,7 @@ const connectionLabel = computed(() =>
             ><span class="surface-orbit orbit-three" aria-hidden="true"></span>
             <div class="surface-label">
               <AppIcon name="monitor" :size="26" /><strong>{{ monitorName }}</strong
-              ><small>{{ picture }}</small>
+              ><small :title="picture">{{ picture }}</small>
             </div>
           </div>
           <i></i>
@@ -118,7 +134,14 @@ const connectionLabel = computed(() =>
           }}<template v-if="!displayOnly">
             · {{ state.config.role === 'host' ? '接收键鼠' : '提供键鼠' }}</template
           ></small
-        ><span class="input-badge">输入源 {{ state.config.peerInput ?? '待配置' }}</span>
+        ><span class="input-badge"
+          >输入源
+          {{
+            state.config.displayMethod === 'signal'
+              ? '自动选源'
+              : (state.config.peerInput ?? '待配置')
+          }}</span
+        >
       </div>
     </div>
     <div class="workspace-controls">

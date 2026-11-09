@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import Carbon
 
 let action = CommandLine.arguments.dropFirst().first ?? "check"
 if action == "screens" {
@@ -19,6 +20,17 @@ if action == "screens" {
 }
 if action == "check" {
     print(AXIsProcessTrusted() ? "true" : "false")
+    exit(0)
+}
+if action == "diagnose" {
+    // Read-only checks: never request permissions or post input events here.
+    let status: [String: Any] = [
+        "accessibility": AXIsProcessTrusted(),
+        "postEventAccess": CGPreflightPostEventAccess(),
+        "secureEventInput": IsSecureEventInputEnabled()
+    ]
+    let data = try JSONSerialization.data(withJSONObject: status)
+    print(String(data: data, encoding: .utf8)!)
     exit(0)
 }
 if action == "pointer" {

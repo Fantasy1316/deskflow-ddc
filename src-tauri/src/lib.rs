@@ -4,6 +4,7 @@ pub mod engine;
 #[cfg(target_os = "macos")]
 pub mod engine_guard;
 pub mod model;
+pub mod output_guard;
 pub mod platform;
 // Pure parsers also compile on other hosts for fixture tests.
 pub mod linux;

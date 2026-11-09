@@ -10,6 +10,8 @@ import Dashboard from '../src/components/Dashboard.vue'
 import DisplayPanel from '../src/components/DisplayPanel.vue'
 import PairingPanel from '../src/components/PairingPanel.vue'
 import RuntimeError from '../src/components/RuntimeError.vue'
+import DisplaySourcePicker from '../src/components/dashboard/DisplaySourcePicker.vue'
+import { actionSchema } from '../src/shared/actions'
 
 function snapshot(): Snapshot {
   return {
@@ -56,6 +58,57 @@ afterEach(() => {
 })
 
 describe('truthful workspace state', () => {
+  it('distinguishes observed/user-confirmed sources from sent commands', () => {
+    const state = snapshot()
+    state.displaySource = { kind: 'ddc', device: 'win' }
+    expect(pictureCommandLabel(state)).toBe('当前来源：工作电脑（DDC 读取）')
+    state.displaySource = { kind: 'manual', device: 'win' }
+    expect(pictureCommandLabel(state)).toBe('当前来源：工作电脑（用户确认）')
+    state.displayDeviceId = 'mac'
+    expect(pictureCommandLabel(state)).toBe('最近指令切到 MacBook')
+    state.displaySource = { kind: 'checking' }
+    expect(pictureCommandLabel(state)).toBe('正在识别当前输入源…')
+    state.displaySource = { kind: 'unknown', reason: '两端读取不一致' }
+    expect(pictureCommandLabel(state)).toBe('请选择当前画面来源')
+  })
+  it('offers non-switching source confirmation and only DDC mode offers detection', async () => {
+    const state = snapshot()
+    state.connected = true
+    state.displayStatus = 'uncertain'
+    state.displayDeviceId = null
+    state.displaySource = { kind: 'unknown', reason: '输入源未能匹配配置' }
+    for (const method of ['ddc', 'signal'] as const) {
+      state.config.displayMethod = method
+      const html = await renderToString(
+        createSSRApp(() => h(DisplaySourcePicker, { state, busy: false })),
+      )
+      expect(html).toContain('共用显示器现在显示哪台电脑？')
+      expect(html).toContain('本机：MacBook')
+      expect(html).toContain('另一台：工作电脑')
+      expect(html).toContain('仅更新来源记录，不切屏、不转移键鼠')
+      expect(html.includes('重新检测')).toBe(method === 'ddc')
+    }
+    state.displaySource = { kind: 'checking' }
+    const reading = await renderToString(
+      createSSRApp(() => h(DisplaySourcePicker, { state, busy: false })),
+    )
+    expect(reading).toContain('正在读取共用显示器当前输入源')
+    expect(reading).not.toContain('<button')
+    state.connected = false
+    expect(
+      await renderToString(createSSRApp(() => h(DisplaySourcePicker, { state, busy: false }))),
+    ).not.toContain('共用显示器')
+    expect(actionSchema.parse({ type: 'confirmDisplaySource', target: 'peer' })).toEqual({
+      type: 'confirmDisplaySource',
+      target: 'peer',
+    })
+    expect(actionSchema.safeParse({ type: 'confirmDisplaySource', target: 'other' }).success).toBe(
+      false,
+    )
+    expect(
+      actionSchema.safeParse({ type: 'detectDisplaySource', command: 'anything' }).success,
+    ).toBe(false)
+  })
   it('keeps picture command history independent of keyboard ownership and physical verification', async () => {
     const state = snapshot()
     expect(pictureCommandLabel(state)).toBe('最近指令切到 工作电脑')
@@ -207,8 +260,9 @@ describe('pairing actions and recovery', () => {
     expect(html).toMatch(/<button[^>]*class="button primary"[^>]*>[^]*?开始共享/)
     expect(html).not.toMatch(/<button[^>]*class="button primary"[^>]*disabled[^>]*>[^<]*开始共享/)
   })
-  it('shows persistent, copyable error details and recovery actions', async () => {
-    const html = await renderToString(
+  it('floats persistent, copyable errors outside the scrolling page with recovery actions', async () => {
+    const context: { teleports?: Record<string, string> } = {}
+    const pageHtml = await renderToString(
       createSSRApp({
         render: () =>
           h(RuntimeError, {
@@ -218,7 +272,11 @@ describe('pairing actions and recovery', () => {
             preview: false,
           }),
       }),
+      context,
     )
+    const html = context.teleports?.body ?? ''
+    expect(pageHtml).not.toContain('native write failed')
+    expect(html).toContain('runtime-error-layer')
     expect(html).toContain('切换画面与键鼠遇到问题')
     expect(html).toContain('copyable-text')
     expect(html).toContain('native write failed')

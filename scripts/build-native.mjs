@@ -68,4 +68,17 @@ execFileSync(
   ],
   { stdio: 'inherit' },
 )
-console.log('原生 DDC 与快捷键桥已编译。')
+execFileSync(
+  'swiftc',
+  [
+    '-target',
+    'arm64-apple-macosx14.0',
+    '-module-cache-path',
+    cache,
+    'native/mac-output.swift',
+    '-o',
+    'resources/bin/mac-output',
+  ],
+  { stdio: 'inherit' },
+)
+console.log('原生 DDC、快捷键和显示输出桥已编译。')

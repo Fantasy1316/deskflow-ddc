@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: ['main', 'upgrade/tauri-v0.2']
-    tags: ['v0.2.*']
+    tags: ['v0.2.*', 'v0.3.*']
   pull_request:
     paths:
       [

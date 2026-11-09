@@ -47,9 +47,21 @@ pub enum OperationMode {
     Sharing,
     DisplayOnly,
 }
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayMethod {
+    #[default]
+    Ddc,
+    Signal,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub display_method: DisplayMethod,
+    /// Native display UUID on macOS; stable logical screen ID on Windows.
+    #[serde(default)]
+    pub output_id: String,
     #[serde(default)]
     pub mode: OperationMode,
     pub device_name: String,
@@ -77,6 +89,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            display_method: DisplayMethod::Ddc,
+            output_id: String::new(),
             mode: OperationMode::Sharing,
             device_name: hostname::get()
                 .unwrap_or_default()
@@ -110,6 +124,17 @@ fn clean(s: &str, max: usize) -> bool {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        ensure!(clean(&self.output_id, 128), "显示输出标识无效");
+        if self.display_method == DisplayMethod::Signal {
+            ensure!(
+                self.mode == OperationMode::Sharing,
+                "自动选源兜底需要两端联网共享"
+            );
+            ensure!(
+                self.cross_screen_video == "manual",
+                "自动选源兜底仅允许快捷键或按钮切换画面"
+            );
+        }
         ensure!(
             clean(&self.device_name, 48) && !self.device_name.trim().is_empty(),
             "设备名称无效"
@@ -134,7 +159,9 @@ impl Config {
             "显示器或引擎路径无效"
         );
         ensure!(
-            self.local_input.is_none() || self.local_input != self.peer_input,
+            self.display_method == DisplayMethod::Signal
+                || self.local_input.is_none()
+                || self.local_input != self.peer_input,
             "两端输入源不能相同"
         );
         ensure!(
@@ -166,10 +193,23 @@ impl Config {
     }
     pub fn ready(&self) -> Result<()> {
         self.validate()?;
-        ensure!(
-            !self.display_id.is_empty() && self.local_input.is_some() && self.peer_input.is_some(),
-            "请先配置显示器和两端输入源"
-        );
+        if self.display_method == DisplayMethod::Ddc {
+            ensure!(
+                !self.display_id.is_empty()
+                    && self.local_input.is_some()
+                    && self.peer_input.is_some(),
+                "请先配置显示器和两端输入源"
+            );
+        } else {
+            ensure!(
+                !self.output_id.is_empty(),
+                "请先配置自动选源使用的本机显示输出"
+            );
+            ensure!(
+                matches!(platform(), "darwin" | "win32"),
+                "自动选源兜底暂只支持 Apple Silicon macOS 和 Windows"
+            );
+        }
         ensure!(
             platform() != "unsupported",
             "当前支持 macOS、Windows 和 Ubuntu Linux"
@@ -191,6 +231,10 @@ pub struct Pin {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    #[serde(default)]
+    pub display_method: DisplayMethod,
+    #[serde(default)]
+    pub output_protocol: u8,
     #[serde(default)]
     pub file_protocol: u8,
     #[serde(default)]
@@ -240,7 +284,13 @@ impl Identity {
             self.layout_version == 1 && valid_fingerprint(&self.fingerprint),
             "对端协议或证书身份无效"
         );
+        ensure!(
+            self.display_method != DisplayMethod::Signal
+                || self.output_protocol == crate::output_guard::PROTOCOL,
+            "对端自动选源协议无效"
+        );
         let c = Config {
+            display_method: self.display_method,
             device_name: self.name.clone(),
             role: self.role.clone(),
             local_input: Some(self.local_input),

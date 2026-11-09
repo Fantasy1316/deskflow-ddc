@@ -67,7 +67,10 @@ const retainedAvailable = computed(
     >
     <label class="field"
       ><span>鼠标跨屏时，共用显示器如何切换</span
-      ><select v-model="displayedVideo" :disabled="locked || !isHost">
+      ><select
+        v-model="displayedVideo"
+        :disabled="locked || !isHost || state.config.displayMethod === 'signal'"
+      >
         <option value="manual">画面仅手动切换，边缘只转移键鼠（推荐）</option>
         <option value="follow">允许边缘跟随键鼠切换画面</option>
         <option value="keep">目标有独立屏幕时仅转移键鼠，否则允许边缘切换画面</option>

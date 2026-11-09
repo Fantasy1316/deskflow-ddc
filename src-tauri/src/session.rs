@@ -146,7 +146,7 @@ impl Session {
         let frame = match result {
             Ok(result) => json!({"kind":"response","id":id,"result":result}),
             Err(e) => {
-                json!({"kind":"response","id":id,"error":e.to_string().chars().take(400).collect::<String>()})
+                json!({"kind":"response","id":id,"error":format!("{e:#}").chars().take(400).collect::<String>()})
             }
         };
         self.sender

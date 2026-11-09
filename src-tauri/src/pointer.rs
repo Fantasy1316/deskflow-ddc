@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Point {
@@ -143,6 +143,43 @@ pub fn landing(b: &Bounds, current: Point, side: &str) -> Point {
     }
     p
 }
+/// Two distinct provider positions force a real outward motion even when the
+/// pointer was already parked on the border before its temporary gate opened.
+#[cfg(target_os = "macos")]
+pub fn edge_approach(panels: &[Panel], side: &str, position: f64) -> Result<(Point, Point)> {
+    let exit = exit(panels, side, position)?;
+    let bounds = &panels
+        .iter()
+        .find(|p| p.bounds.contains(exit))
+        .context("找不到跨屏边缘所在屏幕")?
+        .bounds;
+    let mut inside = exit;
+    match side {
+        "left" => inside.x -= 8.0_f64.min(bounds.width - 1.0),
+        "right" => inside.x += 8.0_f64.min(bounds.width - 1.0),
+        "top" => inside.y -= 8.0_f64.min(bounds.height - 1.0),
+        "bottom" => inside.y += 8.0_f64.min(bounds.height - 1.0),
+        _ => anyhow::bail!("未设置跨屏方向"),
+    }
+    ensure!(
+        inside != exit && bounds.contains(inside),
+        "屏幕尺寸不足以触发边缘跨屏"
+    );
+    Ok((inside, exit))
+}
+/// Place input on the incoming aggregate edge, retaining the crossing fraction.
+pub fn entry(panels: &[Panel], side: &str, position: f64) -> Result<Point> {
+    ensure!(
+        matches!(side, "left" | "right" | "top" | "bottom"),
+        "未设置跨屏方向"
+    );
+    let edge = exit(panels, side, position)?;
+    let panel = panels
+        .iter()
+        .find(|p| p.bounds.contains(edge))
+        .context("找不到跨屏落点")?;
+    Ok(landing(&panel.bounds, edge, side))
+}
 pub fn opposite(side: &str) -> &str {
     match side {
         "left" => "right",
@@ -270,6 +307,78 @@ pub fn cursor() -> Result<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incoming_position_preserves_fraction_and_uses_the_correct_outer_panel() {
+        let panels = vec![
+            Panel {
+                id: "left".into(),
+                name: "".into(),
+                internal: false,
+                bounds: Bounds {
+                    x: -1000.0,
+                    y: -200.0,
+                    width: 1000.0,
+                    height: 800.0,
+                },
+            },
+            Panel {
+                id: "right".into(),
+                name: "".into(),
+                internal: false,
+                bounds: Bounds {
+                    x: 0.0,
+                    y: -200.0,
+                    width: 2000.0,
+                    height: 800.0,
+                },
+            },
+        ];
+        for position in [0.25, 0.5, 0.75] {
+            for (side, expected) in [
+                (
+                    "left",
+                    Point {
+                        x: 1976.0,
+                        y: -200.0 + 799.0 * position,
+                    },
+                ),
+                (
+                    "right",
+                    Point {
+                        x: -976.0,
+                        y: -200.0 + 799.0 * position,
+                    },
+                ),
+                (
+                    "top",
+                    Point {
+                        x: -1000.0 + 2999.0 * position,
+                        y: 576.0,
+                    },
+                ),
+                (
+                    "bottom",
+                    Point {
+                        x: -1000.0 + 2999.0 * position,
+                        y: -176.0,
+                    },
+                ),
+            ] {
+                assert_eq!(entry(&panels, side, position).unwrap(), expected, "{side}");
+            }
+        }
+        for side in ["left", "right", "top", "bottom"] {
+            for position in [0.0, 1.0] {
+                let point = entry(&panels, side, position).unwrap();
+                assert!(panels.iter().any(|p| p.bounds.contains(point)));
+            }
+            for invalid in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+                assert!(entry(&panels, side, invalid).is_err());
+            }
+        }
+        assert!(entry(&panels, "off", 0.5).is_err());
+        assert!(entry(&[], "left", 0.5).is_err());
+    }
     #[test]
     fn seam_preserves_fraction() {
         let b = Bounds {

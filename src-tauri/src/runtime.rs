@@ -1,17 +1,27 @@
 mod control;
 mod display_only;
 mod display_recovery;
+mod display_source;
+use display_source::DisplaySource;
+pub(crate) use display_source::SourcePrompt;
+mod output_switch;
+mod progress;
+pub use output_switch::RestoreRequest as OutputRestoreRequest;
+use progress::{SwitchProgress, SwitchStage};
 mod engine_session;
+#[cfg(target_os = "macos")]
+mod native_edge;
 mod pointer_bridge;
 mod startup;
 mod switch_flow;
+mod switch_protection;
 mod system_control;
 
 use crate::{
     diagnostics::Diagnostics,
     discovery::{self, Device, Discovery},
     engine::{self, Engine},
-    model::{platform, Config, Identity, ModifierMapping, OperationMode, Pin},
+    model::{platform, Config, DisplayMethod, Identity, ModifierMapping, OperationMode, Pin},
     platform::Platform,
     pointer::{self, Panel, Point},
     protocol::{self, Wire},
@@ -87,9 +97,16 @@ pub struct Snapshot {
     pub active_device_id: Option<String>,
     pub display_device_id: Option<String>,
     pub display_target: Option<String>,
+    pub output_switch: Option<output_switch::SwitchRecord>,
+    pub local_output_recovery_pending: bool,
+    pub output_check: Option<Value>,
+    pub output_displays: Value,
     pub last_display_device_id: Option<String>,
     pub display_status: String,
+    pub display_source: Option<DisplaySource>,
     pub switching: bool,
+    pub switch_progress: Option<SwitchProgress>,
+    pub emergency_stopping: bool,
     pub pairing_code: String,
     pub has_saved_pairing: bool,
     pub dependencies: Dependencies,
@@ -125,9 +142,16 @@ impl Snapshot {
             active_device_id: None,
             display_device_id: None,
             display_target: None,
+            output_switch: None,
+            local_output_recovery_pending: false,
+            output_check: None,
+            output_displays: json!([]),
             last_display_device_id: None,
             display_status: "uninitialized".into(),
+            display_source: None,
             switching: false,
+            switch_progress: None,
+            emergency_stopping: false,
             pairing_code: store.pairing.clone(),
             has_saved_pairing: store.value.trusted_peer.is_some(),
             dependencies: Dependencies {
@@ -144,23 +168,22 @@ impl Snapshot {
     }
     fn control_connected(&mut self, host: String) {
         self.connected = true;
-        self.active_device_id = Some(host.clone());
-        // Only an unknown initial picture assumes the host picture. Stopping or
-        // recreating the input engine does not change the monitor's physical input.
-        if self.display_status == "uninitialized"
-            && self.display_device_id.is_none()
-            && self.last_display_device_id.is_none()
-        {
-            self.display_device_id = Some(host.clone());
-            self.last_display_device_id = Some(host);
-        }
+        // Input ownership does not establish the monitor's selected input.
+        self.active_device_id = Some(host);
     }
     fn control_disconnected(&mut self) {
+        if matches!(self.display_source, Some(DisplaySource::Checking)) {
+            self.display_source = None;
+        }
         if self.switching {
             // A DDC command may have reached the monitor before its acknowledgement
             // was lost. Keep the previous source for diagnostics, never for routing.
             self.display_device_id = None;
             self.display_status = "uncertain".into();
+            self.display_source = None;
+        }
+        if self.config.display_method == DisplayMethod::Signal {
+            self.reset_display();
         }
         self.connected = false;
         self.engine = "stopped".into();
@@ -168,13 +191,20 @@ impl Snapshot {
         self.session_layout = None;
         self.active_device_id = None;
         self.switching = false;
+        if !self.emergency_stopping {
+            self.switch_progress = None;
+        }
         self.connection = None;
     }
     fn reset_display(&mut self) {
+        // A failed local guardian restoration belongs to its captured baseline,
+        // not to this connection or the currently selected display settings.
         self.display_target = None;
+        self.output_switch = None;
         self.display_device_id = None;
         self.last_display_device_id = None;
         self.display_status = "uninitialized".into();
+        self.display_source = None;
     }
     fn pairing_changed(&mut self, code: String) {
         self.pairing_code = code;
@@ -217,12 +247,14 @@ struct Link {
 struct Transition {
     from: String,
     to: String,
+    position: Option<Point>,
 }
 #[derive(Clone, Debug)]
 struct Completed {
     session: u64,
     to: String,
     error: Option<String>,
+    position: Option<Point>,
 }
 pub struct Runtime {
     pub transfers: Arc<crate::transfer::Manager>,
@@ -232,6 +264,7 @@ pub struct Runtime {
     fingerprint: String,
     directory: PathBuf,
     pub updates: watch::Sender<Snapshot>,
+    pub(crate) source_reminders: watch::Sender<u64>,
     dirty: AtomicBool,
     epoch: AtomicU64,
     session_sequence: AtomicU64,
@@ -241,10 +274,13 @@ pub struct Runtime {
     topology_busy: AtomicBool,
     topology_ready: watch::Sender<bool>,
     display_recovery: Mutex<display_recovery::DisplayRecovery>,
+    display_only_history: Mutex<display_only::ToggleHistory>,
     link: Mutex<Option<Arc<Link>>>,
     engine: Mutex<Option<Engine>>,
+    output_lease: Mutex<Option<crate::output_guard::Lease>>,
     pub actions: Mutex<()>,
     commands: Mutex<()>,
+    switch_protection: switch_protection::Protection,
     effects: Mutex<()>,
     command_pending: AtomicBool,
     keyboard_pending: AtomicU64,
@@ -293,6 +329,7 @@ impl Runtime {
             fingerprint,
             directory,
             updates,
+            source_reminders: watch::channel(0).0,
             dirty: AtomicBool::new(true),
             epoch: AtomicU64::new(0),
             session_sequence: AtomicU64::new(0),
@@ -302,10 +339,13 @@ impl Runtime {
             topology_busy: AtomicBool::new(false),
             topology_ready: watch::channel(true).0,
             display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
+            display_only_history: Mutex::new(display_only::ToggleHistory::default()),
             link: Mutex::new(None),
             engine: Mutex::new(None),
+            output_lease: Mutex::new(None),
             actions: Mutex::new(()),
             commands: Mutex::new(()),
+            switch_protection: switch_protection::Protection::default(),
             effects: Mutex::new(()),
             command_pending: AtomicBool::new(false),
             keyboard_pending: AtomicU64::new(0),
@@ -471,6 +511,11 @@ impl Runtime {
             self.platform.accessibility(),
             self.platform.screens()
         );
+        let outputs = if c.display_method == DisplayMethod::Signal {
+            self.platform.output_list().await.ok()
+        } else {
+            None
+        };
         let mut i = self.inner.lock().await;
         i.state.dependencies = Dependencies {
             deskflow: path.is_some(),
@@ -485,6 +530,9 @@ impl Runtime {
         .into();
         if let Ok(screens) = screens {
             i.state.cursor_displays = serde_json::from_value(screens)?;
+        }
+        if let Some(outputs) = outputs {
+            i.state.output_displays = outputs;
         }
         i.state.addresses = discovery::local_addresses();
         self.publish();
@@ -518,12 +566,15 @@ impl Runtime {
                 return Err(e);
             }
             if old.mode != c.mode
+                || old.display_method != c.display_method
+                || old.output_id != c.output_id
                 || old.display_id != c.display_id
                 || old.local_input != c.local_input
                 || old.peer_input != c.peer_input
             {
                 i.state.reset_display();
             }
+            i.state.output_check = None;
             i.state.config = c.clone();
         }
         if c.mode == OperationMode::DisplayOnly {
@@ -535,9 +586,27 @@ impl Runtime {
         Ok(())
     }
     pub async fn scan(&self) -> Result<()> {
-        ensure!(!self.snapshot().await.switching, "正在切换，请稍后扫描");
-        let monitors = self.platform.list().await?;
-        self.inner.lock().await.state.monitors = monitors;
+        self.scan_displays(self.snapshot().await.config.display_method)
+            .await
+    }
+    pub async fn scan_displays(&self, method: DisplayMethod) -> Result<()> {
+        let state = self.snapshot().await;
+        ensure!(
+            !state.switching && !state.emergency_stopping,
+            "正在切换或恢复输出，请稍后扫描"
+        );
+        // Scan the draft method without saving or changing the running config.
+        ensure!(
+            !state.running || method == state.config.display_method,
+            "请停止共享后扫描另一种切屏方式"
+        );
+        if method == DisplayMethod::Signal {
+            let outputs = self.platform.output_list().await?;
+            self.inner.lock().await.state.output_displays = outputs;
+        } else {
+            let monitors = self.platform.list().await?;
+            self.inner.lock().await.state.monitors = monitors;
+        }
         self.publish();
         Ok(())
     }
@@ -610,6 +679,8 @@ impl Runtime {
         let c = &i.state.config;
         c.ready()?;
         Ok(Identity {
+            display_method: c.display_method,
+            output_protocol: crate::output_guard::PROTOCOL,
             file_protocol: 1,
             lock_control: platform() == "win32",
             app_version: env!("CARGO_PKG_VERSION").into(),
@@ -618,8 +689,8 @@ impl Runtime {
             platform: platform().into(),
             fingerprint: self.fingerprint.clone(),
             role: c.role.clone(),
-            local_input: c.local_input.unwrap(),
-            peer_input: c.peer_input.unwrap(),
+            local_input: c.local_input.unwrap_or(0),
+            peer_input: c.peer_input.unwrap_or(0),
             shortcut: c.shortcut.clone(),
             modifier_mapping: c.modifier_mapping,
             clipboard: c.clipboard,
@@ -634,6 +705,10 @@ impl Runtime {
     }
     pub async fn start(self: &Arc<Self>, pairing: Option<String>) -> Result<()> {
         let _lifecycle = self.start_stop.lock().await;
+        ensure!(
+            !self.snapshot().await.emergency_stopping,
+            "正在停止共享并恢复输出"
+        );
         ensure!(!self.snapshot().await.running, "共享已经启动");
         if self.snapshot().await.config.mode == OperationMode::DisplayOnly {
             return self.start_display_only().await;
@@ -650,6 +725,9 @@ impl Runtime {
         let state = self.snapshot().await;
         let c = state.config;
         c.ready()?;
+        if c.display_method == DisplayMethod::Signal {
+            self.check_output_selection(&c).await?;
+        }
         #[cfg(windows)]
         if c.windows_secure_input && c.role == "client" {
             ensure!(c.deskflow_path.is_empty(), "安全桌面模式仅支持内置引擎");
@@ -661,7 +739,7 @@ impl Runtime {
         }
         self.binary(&c)?;
         ensure!(
-            state.dependencies.display_control,
+            c.display_method == DisplayMethod::Signal || state.dependencies.display_control,
             "原生显示器桥未准备，请检查安装包"
         );
         ensure!(
@@ -775,6 +853,7 @@ impl Runtime {
         Ok(())
     }
     pub async fn stop(&self) -> Result<()> {
+        self.interrupt_switch_wait();
         let _lifecycle = self.start_stop.lock().await;
         self.trace("sharing.stopRequested", json!({})).await;
         self.epoch.fetch_add(1, Ordering::AcqRel);
@@ -787,9 +866,11 @@ impl Runtime {
         }
         self.active_session.store(0, Ordering::Release);
         self.topology_ready.send_replace(true);
-        if let Some((_, task)) = network {
-            task.await.context("等待网络监听退出失败")?;
-        }
+        let network_result = if let Some((_, task)) = network {
+            task.await.context("等待网络监听退出失败")
+        } else {
+            Ok(())
+        };
         {
             let mut i = self.inner.lock().await;
             i.state.running = false;
@@ -801,18 +882,31 @@ impl Runtime {
         }
         let _command = self.commands.lock().await;
         let _effects = self.effects.lock().await;
-        let mut guard = self.engine.lock().await;
-        if let Some(engine) = guard.as_mut() {
-            let pid = engine.pid();
-            engine.stop().await?;
-            self.trace(
-                "engine.stopped",
-                json!({"pid":pid,"reason":"sharingStopped"}),
-            )
-            .await;
-        }
-        *guard = None;
-        drop(guard);
+        self.switch_protection.wait_released().await;
+        let engine_result = {
+            let mut guard = self.engine.lock().await;
+            let result = if let Some(engine) = guard.as_mut() {
+                let pid = engine.pid();
+                let result = engine.stop().await.context("停止键鼠引擎失败");
+                if result.is_ok() {
+                    self.trace(
+                        "engine.stopped",
+                        json!({"pid":pid,"reason":"sharingStopped"}),
+                    )
+                    .await;
+                }
+                result
+            } else {
+                Ok(())
+            };
+            // A failed owned process must stay tracked for the next recovery.
+            if result.is_ok() {
+                *guard = None;
+            }
+            result
+        };
+        // Release input capture before potentially slow display restoration.
+        let output_restore = self.restore_local_output().await;
         self.platform.close().await;
         {
             let mut i = self.inner.lock().await;
@@ -825,6 +919,11 @@ impl Runtime {
         self.command_pending.store(false, Ordering::Release);
         self.keyboard_pending.store(0, Ordering::Release);
         self.publish();
+        let errors: Vec<String> = [network_result, engine_result, output_restore]
+            .into_iter()
+            .filter_map(|r| r.err().map(|e| format!("{e:#}")))
+            .collect();
+        ensure!(errors.is_empty(), "{}", errors.join("；"));
         Ok(())
     }
     pub async fn export(&self) -> Result<Value> {
@@ -854,6 +953,12 @@ impl Runtime {
         let s = self.snapshot().await;
         if s.config.mode == OperationMode::DisplayOnly {
             return (s.running && s.config.ready().is_ok()).then_some(s.config.shortcut);
+        }
+        // The Windows engine captures this chord before forwarding/remapping
+        // and reports its action regardless of input ownership. A second OS
+        // registration would conflict or double-toggle.
+        if engine::provider_shortcut(&s.config, platform()) {
+            return None;
         }
         let manual = s
             .session_layout
@@ -912,12 +1017,20 @@ fn distance(a: Point, b: Point) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 fn parse_transition(line: &str) -> Option<Transition> {
-    let re =
-        regex::Regex::new(r#"switch from "sb-([a-f0-9-]{36})" to "sb-([a-f0-9-]{36})""#).ok()?;
+    let re = regex::Regex::new(
+        r#"switch from "sb-([a-f0-9-]{36})" to "sb-([a-f0-9-]{36})"(?: at (-?\d+),(-?\d+))?"#,
+    )
+    .ok()?;
     let m = re.captures(line)?;
     Some(Transition {
         from: m[1].into(),
         to: m[2].into(),
+        position: m.get(3).zip(m.get(4)).and_then(|(x, y)| {
+            Some(Point {
+                x: x.as_str().parse::<i32>().ok()? as f64,
+                y: y.as_str().parse::<i32>().ok()? as f64,
+            })
+        }),
     })
 }
 pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Identity) -> Result<()> {
@@ -954,7 +1067,17 @@ pub fn validate_peer(c: &Config, id: uuid::Uuid, pin: Option<&Pin>, peer: &Ident
         "Windows 无法注册 F12 全局快捷键；请在提供端改为 Ctrl + Alt + F10 后重新连接"
     );
     ensure!(
-        c.local_input == Some(peer.peer_input) && c.peer_input == Some(peer.local_input),
+        c.display_method == peer.display_method,
+        "两端切屏方式不一致，请在显示器设置中选择相同方式"
+    );
+    ensure!(
+        c.display_method != DisplayMethod::Signal
+            || peer.output_protocol == crate::output_guard::PROTOCOL,
+        "对端不支持自动选源兜底，请更新两端应用"
+    );
+    ensure!(
+        c.display_method == DisplayMethod::Signal
+            || (c.local_input == Some(peer.peer_input) && c.peer_input == Some(peer.local_input)),
         "两端输入源映射不对应"
     );
     Ok(())
@@ -1037,8 +1160,8 @@ mod tests {
             assert!(s.last_display_device_id.is_none());
             assert_eq!(s.display_status, "uninitialized");
             s.control_connected("new-provider".into());
-            assert_eq!(s.display_device_id.as_deref(), Some("new-provider"));
-            assert_eq!(s.last_display_device_id, s.display_device_id);
+            assert!(s.display_device_id.is_none());
+            assert!(s.last_display_device_id.is_none());
         }
     }
     #[test]
@@ -1056,7 +1179,7 @@ mod tests {
         s.control_disconnected();
         s.reset_display();
         s.control_connected("provider".into());
-        assert_eq!(s.display_device_id.as_deref(), Some("provider"));
+        assert!(s.display_device_id.is_none());
     }
     #[test]
     fn disconnect_during_switch_never_assumes_ddc_failed_to_reach_monitor() {
@@ -1068,10 +1191,12 @@ mod tests {
         assert!(!s.switching);
         assert!(s.display_device_id.is_none());
         assert_eq!(s.display_status, "uncertain");
-        assert_eq!(s.last_display_device_id.as_deref(), Some("provider"));
+        assert!(s.last_display_device_id.is_none());
     }
     pub(super) fn peer() -> Identity {
         Identity {
+            display_method: DisplayMethod::Ddc,
+            output_protocol: crate::output_guard::PROTOCOL,
             file_protocol: 1,
             lock_control: true,
             app_version: env!("CARGO_PKG_VERSION").into(),
@@ -1093,6 +1218,45 @@ mod tests {
             retained_display: false,
         }
     }
+    #[test]
+    fn automatic_source_requires_explicit_matching_capabilities_but_legacy_ddc_still_pairs() {
+        let id = uuid::Uuid::new_v4();
+        let mut p = peer();
+        let mut c = Config {
+            local_input: Some(17),
+            peer_input: Some(1),
+            ..Config::default()
+        };
+        let mut raw = serde_json::to_value(&p).unwrap();
+        raw.as_object_mut().unwrap().remove("displayMethod");
+        raw.as_object_mut().unwrap().remove("outputProtocol");
+        let legacy: Identity = serde_json::from_value(raw).unwrap();
+        assert!(validate_peer(&c, id, None, &legacy).is_ok());
+        c.display_method = DisplayMethod::Signal;
+        assert!(validate_peer(&c, id, None, &legacy).is_err());
+        p.display_method = DisplayMethod::Signal;
+        p.cross_screen_video = "manual".into();
+        p.local_input = 0;
+        p.peer_input = 0;
+        assert!(validate_peer(&c, id, None, &p).is_ok());
+        for unsupported in [0, 1, 2, 3, 5] {
+            p.output_protocol = unsupported;
+            assert!(validate_peer(&c, id, None, &p).is_err());
+        }
+    }
+
+    #[test]
+    fn automatic_source_reconnect_never_assumes_the_host_picture() {
+        let mut s = snapshot();
+        s.config.display_method = DisplayMethod::Signal;
+        s.display_device_id = Some("receiver".into());
+        s.control_disconnected();
+        s.control_connected("provider".into());
+        assert!(s.display_device_id.is_none());
+        assert!(s.last_display_device_id.is_none());
+        assert!(s.output_switch.is_none());
+    }
+
     #[test]
     fn pins_are_identity_not_hostname() {
         let p = peer();
@@ -1158,7 +1322,30 @@ mod tests {
     }
     #[test]
     fn parses_only_engine_screen_names() {
-        assert!(parse_transition("switch from \"sb-11111111-1111-1111-1111-111111111111\" to \"sb-22222222-2222-2222-2222-222222222222\" at 5,40").is_some());
+        let prefix = "switch from \"sb-11111111-1111-1111-1111-111111111111\" to \"sb-22222222-2222-2222-2222-222222222222\"";
+        for (text, point) in [
+            (" at 5,40", Point { x: 5.0, y: 40.0 }),
+            (
+                " at -1920,-180",
+                Point {
+                    x: -1920.0,
+                    y: -180.0,
+                },
+            ),
+            (" at 0,0", Point { x: 0.0, y: 0.0 }),
+        ] {
+            assert_eq!(
+                parse_transition(&format!("{prefix}{text}"))
+                    .unwrap()
+                    .position,
+                Some(point)
+            );
+        }
+        assert!(parse_transition(prefix).unwrap().position.is_none());
+        assert!(parse_transition(&format!("{prefix} at 999999999999999,0"))
+            .unwrap()
+            .position
+            .is_none());
         assert!(parse_transition("switch from foo to bar").is_none());
     }
     #[test]

@@ -1,10 +1,28 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted, useTemplateRef } from 'vue'
 import AppIcon from './AppIcon.vue'
 defineProps<{ running: boolean; busy: boolean; displayOnly?: boolean }>()
 defineEmits<{ stop: [] }>()
+const help = useTemplateRef<HTMLDetailsElement>('help')
+function close() {
+  if (help.value) help.value.open = false
+}
+function closeOutside(event: Event) {
+  if (event.target instanceof Node && !help.value?.contains(event.target)) close()
+}
+onMounted(() => {
+  document.addEventListener('pointerdown', closeOutside, true)
+  document.addEventListener('focusin', closeOutside, true)
+  window.addEventListener('blur', close)
+})
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', closeOutside, true)
+  document.removeEventListener('focusin', closeOutside, true)
+  window.removeEventListener('blur', close)
+})
 </script>
 <template>
-  <details class="recovery-help">
+  <details ref="help" class="recovery-help" @keydown.esc.stop="close">
     <summary>恢复帮助</summary>
     <div class="recovery-popover">
       <strong>{{ displayOnly ? '画面切换异常？' : '键鼠或画面切换异常？' }}</strong>

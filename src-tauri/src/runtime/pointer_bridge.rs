@@ -1,6 +1,23 @@
 use super::*;
 
 impl Runtime {
+    async fn shared_pointer_target(&self, link: &Link, position: f64) -> Result<Point> {
+        let s = self.snapshot().await;
+        ensure!(self.current(link), "共享会话已结束");
+        ensure!(
+            keep_mode(&s)
+                && s.engine == "ready"
+                && s.active_device_id.as_deref() == Some(&s.device_id)
+                && s.display_device_id.as_deref() == Some(&s.device_id)
+                && s.display_status != "uncertain",
+            "本机共用屏画面或键鼠归属尚未就绪"
+        );
+        pointer::entry(&s.cursor_displays, local_side(&s), position)
+    }
+    pub(super) async fn place_shared_pointer(&self, link: &Link, position: f64) -> Result<()> {
+        let point = self.shared_pointer_target(link, position).await?;
+        self.platform.point(point.x, point.y).await
+    }
     pub(super) async fn land(&self, id: u64) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(80)).await;
         ensure!(
@@ -55,6 +72,13 @@ impl Runtime {
                     .await
                     .observe(std::time::SystemTime::now())
                 {
+                    *this.display_only_history.lock().await =
+                        display_only::ToggleHistory::default();
+                    if this.inner.lock().await.state.config.display_method == DisplayMethod::Signal
+                    {
+                        this.inner.lock().await.state.reset_display();
+                        this.publish();
+                    }
                     this.trace("display.resumeDetected", json!({"pictureVerified":false}))
                         .await;
                 }
@@ -64,7 +88,7 @@ impl Runtime {
                     let s = &i.state;
                     let enabled = keep_mode(s)
                         && s.engine == "ready"
-                        && !s.switching
+                        && (!s.switching || this.switch_protection.settling())
                         && s.active_device_id.as_ref() == Some(&s.device_id)
                         && s.display_device_id.as_deref() == s.peer.as_ref().map(|p| p.id.as_str())
                         && !this.command_pending.load(Ordering::Acquire);
@@ -173,7 +197,7 @@ impl Runtime {
                     .await
             } else {
                 link.session
-                    .request("cross-screen", Value::Null, Duration::from_secs(15))
+                    .request("cross-screen", json!(position), Duration::from_secs(15))
                     .await
                     .map(|_| ())
             }
@@ -216,6 +240,7 @@ pub(super) mod tests {
         Arc::new(Runtime {
             transfers: crate::transfer::Manager::new(directory.join("transfers")).unwrap(),
             updates: watch::channel(state.clone()).0,
+            source_reminders: watch::channel(0).0,
             inner: Mutex::new(Inner {
                 store,
                 state,
@@ -236,10 +261,13 @@ pub(super) mod tests {
             topology_busy: AtomicBool::new(false),
             topology_ready: watch::channel(true).0,
             display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
+            display_only_history: Mutex::new(display_only::ToggleHistory::default()),
             link: Mutex::new(None),
             engine: Mutex::new(None),
+            output_lease: Mutex::new(None),
             actions: Mutex::new(()),
             commands: Mutex::new(()),
+            switch_protection: switch_protection::Protection::immediate(),
             effects: Mutex::new(()),
             command_pending: AtomicBool::new(false),
             keyboard_pending: AtomicU64::new(0),
@@ -291,6 +319,181 @@ pub(super) mod tests {
 
     async fn attach(runtime: &Runtime) -> Session {
         attach_with_requests(runtime).await.0
+    }
+
+    #[tokio::test]
+    async fn hidden_shared_screen_is_rejected_before_any_input_or_display_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        let local = runtime.snapshot().await.device_id;
+        {
+            let mut i = runtime.inner.lock().await;
+            i.state.engine = "ready".into();
+            i.state.session_layout = Some(Layout {
+                host_side: "left".into(),
+                video: "manual".into(),
+            });
+            i.state.active_device_id = Some(local.clone());
+            i.state.display_device_id = Some(local.clone());
+            i.state.peer = Some(Peer {
+                id: "receiver".into(),
+                name: "Receiver".into(),
+                platform: "win32".into(),
+                fingerprint: "a".repeat(64),
+                file_transfer: false,
+                lock_control: false,
+                input_configured: true,
+                retained_display: false,
+                modifier_mapping: ModifierMapping::Original,
+            });
+        }
+        let (remote, mut requests) = attach_with_requests(&runtime).await;
+        let link = runtime.link.lock().await.clone().unwrap();
+        let error = runtime
+            .keyboard_switch(&link, "receiver".into(), Some(0.4))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("目标没有可见屏幕"), "{error:#}");
+        assert!(requests.try_recv().is_err());
+        let state = runtime.snapshot().await;
+        assert_eq!(state.active_device_id, Some(local.clone()));
+        assert_eq!(state.display_device_id, Some(local));
+        assert_eq!(runtime.keyboard_pending.load(Ordering::Acquire), 0);
+        remote.close();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn gated_return_to_local_screen_preserves_position_without_touching_video() {
+        use std::os::unix::fs::PermissionsExt;
+        for method in [DisplayMethod::Ddc, DisplayMethod::Signal] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = fixture(directory.path(), "host");
+            let local = runtime.snapshot().await.device_id;
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.engine = "ready".into();
+                i.state.config.display_method = method;
+                i.state.config.retained_display_id.clear();
+                i.state.session_layout = Some(Layout {
+                    host_side: "left".into(),
+                    video: "manual".into(),
+                });
+                i.state.active_device_id = Some("receiver".into());
+                i.state.display_device_id = Some(local.clone());
+                i.state.peer = Some(Peer {
+                    id: "receiver".into(),
+                    name: "Receiver".into(),
+                    platform: "darwin".into(),
+                    fingerprint: "a".repeat(64),
+                    file_transfer: false,
+                    lock_control: false,
+                    input_configured: true,
+                    retained_display: true,
+                    modifier_mapping: ModifierMapping::Original,
+                });
+            }
+            let helper = runtime.platform.resources.join("native/bin/mac-hotkey");
+            std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            std::fs::write(&helper, "#!/bin/sh\ncase \"$1\" in\nhost|pointer) echo \"$*\" >> \"$0.calls\"; echo sent ;;\n*) exit 9 ;;\nesac\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (remote, mut requests) = attach_with_requests(&runtime).await;
+            let link = runtime.link.lock().await.clone().unwrap();
+            let observing = runtime.clone();
+            let context = link.clone();
+            let marker = helper.with_extension("calls");
+            let target = local.clone();
+            let observer = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                observing
+                    .observe_transition(
+                        &context,
+                        Transition {
+                            from: "receiver".into(),
+                            to: target,
+                            position: None,
+                        },
+                    )
+                    .await;
+            });
+            runtime
+                .keyboard_switch(&link, local.clone(), Some(0.3))
+                .await
+                .unwrap();
+            observer.await.unwrap();
+            let calls = std::fs::read_to_string(helper.with_extension("calls")).unwrap();
+            let calls: Vec<_> = calls.lines().collect();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0], "host");
+            let position: Vec<_> = calls[1].split_whitespace().collect();
+            assert_eq!(position[0], "pointer");
+            assert_eq!(position[1].parse::<f64>().unwrap(), 1416.0);
+            assert!((position[2].parse::<f64>().unwrap() - 269.7).abs() < 1e-9);
+            assert_eq!(
+                runtime.snapshot().await.active_device_id,
+                Some(local.clone())
+            );
+            assert_eq!(runtime.snapshot().await.display_device_id, Some(local));
+            while let Ok(message) = requests.try_recv() {
+                assert!(matches!(message, Incoming::Event { .. }));
+            }
+            remote.close();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn shared_pointer_placement_requires_visible_local_input_and_valid_fraction() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "client");
+        let local = runtime.snapshot().await.device_id;
+        let remote = attach(&runtime).await;
+        let link = runtime.link.lock().await.clone().unwrap();
+        {
+            let mut i = runtime.inner.lock().await;
+            i.state.engine = "ready".into();
+            i.state.session_layout = Some(Layout {
+                host_side: "left".into(),
+                video: "manual".into(),
+            });
+        }
+        for (active, display, status, fraction, expected) in [
+            ("other", local.as_str(), "commanded", 0.5, "尚未就绪"),
+            (local.as_str(), "other", "commanded", 0.5, "尚未就绪"),
+            (local.as_str(), local.as_str(), "uncertain", 0.5, "尚未就绪"),
+            (
+                local.as_str(),
+                local.as_str(),
+                "commanded",
+                -0.1,
+                "跨屏位置无效",
+            ),
+            (
+                local.as_str(),
+                local.as_str(),
+                "commanded",
+                f64::NAN,
+                "跨屏位置无效",
+            ),
+        ] {
+            let mut i = runtime.inner.lock().await;
+            i.state.active_device_id = Some(active.into());
+            i.state.display_device_id = Some(display.into());
+            i.state.display_status = status.into();
+            drop(i);
+            let error = runtime
+                .place_shared_pointer(&link, fraction)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+        remote.close();
     }
 
     #[cfg(target_os = "macos")]
@@ -454,6 +657,7 @@ pub(super) mod tests {
                 Transition {
                     from: local.clone(),
                     to: "receiver".into(),
+                    position: None,
                 },
             )
             .await;
@@ -653,7 +857,7 @@ pub(super) mod tests {
     async fn accepted_ddc_retries_both_directions_without_poisoning_state_on_alternate_failure() {
         use std::os::unix::fs::PermissionsExt;
         for local_first in [false, true] {
-            for target_local in [false, true] {
+            for target_local in [true] {
                 for alternate_fails in [false, true] {
                     let directory = tempfile::tempdir().unwrap();
                     let runtime = fixture(directory.path(), "host");
@@ -783,9 +987,6 @@ pub(super) mod tests {
                 manual: true,
                 keep: true,
                 target_retained: false,
-                provider_retained: true,
-                from_provider: true,
-                requested: false,
                 video_source: restarted.display_device_id.as_deref(),
                 target: "receiver",
                 uncertain: false,

@@ -1,6 +1,15 @@
 use super::*;
 use std::time::{Instant, SystemTime};
 
+#[derive(Debug)]
+pub(super) struct ReadbackUnavailable(anyhow::Error);
+impl std::fmt::Display for ReadbackUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "输入源指令已发送，但暂时无法确认是否生效；已保留键鼠转移结果，请确认实际画面后重试：{}", self.0)
+    }
+}
+impl std::error::Error for ReadbackUnavailable {}
+
 // Sleep can make a monitor auto-select another input without any DDC command.
 // Keep the source invalidated until a fresh read, regardless of wake duration.
 #[derive(Default)]
@@ -50,7 +59,7 @@ fn agree_source(local: Option<String>, remote: Option<String>) -> Result<String>
 }
 
 impl Runtime {
-    async fn query_display_source(&self, link: &Link) -> Result<String> {
+    pub(super) async fn query_display_source(&self, link: &Link) -> Result<String> {
         let s = self.snapshot().await;
         let peer = &s.peer.as_ref().context("对端未连接")?.id;
         let (local, remote) = tokio::join!(
@@ -84,6 +93,9 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         ensure!(self.current(link), "共享会话已结束");
         i.state.display_device_id = Some(source.clone());
+        i.state.display_source = Some(DisplaySource::Ddc {
+            device: source.clone(),
+        });
         // Keep the existing status understood by the UI and control protocol.
         // This is a routing observation, never proof of the physical picture.
         i.state.display_status = "commanded".into();
@@ -105,6 +117,21 @@ impl Runtime {
         };
         let _effects = self.effects.lock().await;
         let s = self.snapshot().await;
+        if s.config.display_method == DisplayMethod::Signal {
+            // Sleep invalidates user-confirmed routing. Release the old lease
+            // and session on BOTH roles so the peer restores its own output too.
+            if let Err(error) = self.restore_local_output().await {
+                self.log("error", &format!("唤醒后恢复显示输出失败：{error:#}"))
+                    .await;
+            }
+            if let Some(link) = self.link.lock().await.as_ref() {
+                link.session.close();
+            }
+            self.inner.lock().await.state.reset_display();
+            self.display_recovery.lock().await.complete(token);
+            self.publish();
+            return;
+        }
         if !s.running || s.config.role != "host" {
             return;
         }
@@ -142,19 +169,40 @@ impl Runtime {
         token: Instant,
         target: &str,
     ) -> Result<()> {
-        tokio::select! {
-            _ = link.session.closed.cancelled() => bail!("共享会话已结束"),
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        // A source change can temporarily make both DDC replies unavailable.
+        // Re-read the same target without reissuing/toggling the command. Bound
+        // the entire confirmation, including slow native/RPC reads.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut observation = Err(anyhow::anyhow!("输入源读取超时"));
+        for delay in [500, 750, 1000] {
+            tokio::select! {
+                _ = link.session.closed.cancelled() => bail!("共享会话已结束"),
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+            }
+            observation =
+                tokio::time::timeout_at(deadline, self.detect_resumed_source(link, token))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("输入源读取超时")));
+            if observation.as_ref().is_ok_and(|source| source == target) {
+                self.display_recovery.lock().await.complete(token);
+                return Ok(());
+            }
+            ensure!(self.current(link), "共享会话已结束");
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
         }
-        let source = match self.detect_resumed_source(link, token).await {
+        let source = match observation {
             Ok(source) => source,
             Err(error) => {
                 if self.current(link) {
                     let mut i = self.inner.lock().await;
                     i.state.display_device_id = None;
                     i.state.display_status = "uncertain".into();
+                    i.state.display_source = None;
                 }
-                return Err(error).context("输入源指令已发送，但暂时无法确认是否生效；目标视频连接可能仍在恢复，请稍后重试");
+                return Err(ReadbackUnavailable(error).into());
             }
         };
         ensure!(
@@ -170,6 +218,23 @@ impl Runtime {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn signal_wake_clears_routing_and_closes_old_session_without_ddc_or_input_calls() {
+        for role in ["host", "client"] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), role);
+            runtime.inner.lock().await.state.config.display_method = DisplayMethod::Signal;
+            let (_remote, _) =
+                super::super::pointer_bridge::tests::attach_with_requests(&runtime).await;
+            let link = runtime.link.lock().await.as_ref().unwrap().clone();
+            runtime.display_recovery.lock().await.mark();
+            runtime.refresh_display_after_resume().await;
+            assert!(link.session.closed.is_cancelled());
+            assert!(runtime.display_recovery.lock().await.pending().is_none());
+            assert!(runtime.snapshot().await.display_device_id.is_none());
+        }
+    }
+
     #[test]
     fn reads_require_a_known_source_and_conflicts_never_choose_a_default() {
         assert_eq!(agree_source(Some("mac".into()), None).unwrap(), "mac");
@@ -180,6 +245,149 @@ mod tests {
         );
         assert!(agree_source(None, None).is_err());
         assert!(agree_source(Some("mac".into()), Some("win".into())).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn accepted_switch_retries_transient_readback_without_undoing_input_or_reissuing_writes()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The final case stays unreadable: preserve the confirmed input move,
+        // report unconfirmed video, and require a fresh source next time.
+        for unavailable in [1, 2, 3] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "host");
+            let local = runtime.snapshot().await.device_id;
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.engine = "ready".into();
+                i.state.active_device_id = Some(local.clone());
+                i.state.display_device_id = Some(local.clone());
+                i.state.config.display_id = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".into();
+                i.state.config.local_input = Some(3);
+                i.state.config.peer_input = Some(1);
+                i.state.peer = Some(Peer {
+                    id: "receiver".into(),
+                    name: "Receiver".into(),
+                    platform: "win32".into(),
+                    fingerprint: "a".repeat(64),
+                    file_transfer: false,
+                    lock_control: false,
+                    input_configured: true,
+                    retained_display: false,
+                    modifier_mapping: ModifierMapping::Common,
+                });
+            }
+            let native = runtime.platform.resources.join("native/bin");
+            std::fs::create_dir_all(&native).unwrap();
+            let hotkey = native.join("mac-hotkey");
+            let ddc = native.join("m1ddc");
+            for (file, script) in [
+                (&hotkey, "#!/bin/sh\necho \"$1\" >> \"$0.calls\"\necho sent\n"),
+                (&ddc, "#!/bin/sh\nif test \"$3\" = get; then test ! -f \"$0.written\" || exit 1; echo 3; exit 0; fi\nif test \"$3\" = set; then echo \"$5\" >> \"$0.written\"; exit 0; fi\nexit 9\n"),
+            ] {
+                std::fs::write(file, script).unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            runtime.display_recovery.lock().await.mark();
+            let (remote, mut requests) =
+                super::super::pointer_bridge::tests::attach_with_requests(&runtime).await;
+            let link = runtime.link.lock().await.clone().unwrap();
+            let reads = Arc::new(AtomicU64::new(0));
+            let count = reads.clone();
+            let writes = Arc::new(AtomicU64::new(0));
+            let written = writes.clone();
+            let replying = remote.clone();
+            let source = local.clone();
+            let receiver = tokio::spawn(async move {
+                while let Some(message) = requests.recv().await {
+                    if let Incoming::Request {
+                        id,
+                        method,
+                        payload,
+                    } = message
+                    {
+                        let response = match method.as_str() {
+                            "get-input-source" => match count.fetch_add(1, Ordering::AcqRel) {
+                                0 => json!(source),
+                                read if read <= unavailable => Value::Null,
+                                _ => json!("receiver"),
+                            },
+                            "set-input" => {
+                                assert_eq!(payload, json!("receiver"));
+                                written.fetch_add(1, Ordering::AcqRel);
+                                json!(true)
+                            }
+                            _ => panic!("Unexpected RPC: {method}"),
+                        };
+                        replying.reply(id, Ok(response)).await.unwrap();
+                    }
+                }
+            });
+            let rt = runtime.clone();
+            let context = link.clone();
+            let calls = hotkey.with_extension("calls");
+            let observation = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !calls.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                rt.observe_transition(
+                    &context,
+                    Transition {
+                        from: local,
+                        to: "receiver".into(),
+                        position: None,
+                    },
+                )
+                .await;
+            });
+            let result = runtime.command_switch_target(&link, None).await;
+            observation.await.unwrap();
+            if unavailable < 3 {
+                result.unwrap();
+                assert!(runtime.display_recovery.lock().await.pending().is_none());
+                assert_eq!(
+                    runtime.snapshot().await.display_device_id.as_deref(),
+                    Some("receiver")
+                );
+            } else {
+                assert!(result.unwrap_err().is::<ReadbackUnavailable>());
+                assert!(runtime.display_recovery.lock().await.pending().is_some());
+                assert_eq!(runtime.snapshot().await.display_status, "uncertain");
+            }
+            assert_eq!(
+                runtime.snapshot().await.active_device_id.as_deref(),
+                Some("receiver")
+            );
+            assert_eq!(
+                std::fs::read_to_string(hotkey.with_extension("calls"))
+                    .unwrap()
+                    .trim(),
+                "peer"
+            );
+            assert_eq!(
+                std::fs::read_to_string(ddc.with_extension("written"))
+                    .unwrap()
+                    .trim(),
+                "1"
+            );
+            assert_eq!(
+                writes.load(Ordering::Acquire),
+                1,
+                "Read retries must not send another DDC command"
+            );
+            assert_eq!(
+                reads.load(Ordering::Acquire),
+                if unavailable < 3 { unavailable + 2 } else { 4 }
+            );
+            assert!(!runtime.command_pending.load(Ordering::Acquire));
+            remote.close();
+            receiver.await.unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]

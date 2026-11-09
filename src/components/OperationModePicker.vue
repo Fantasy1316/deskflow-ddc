@@ -30,7 +30,14 @@ const modes: { id: OperationMode; title: string; description: string; icon: 'lin
         :disabled="busy || state.running"
         @click="
           state.config.mode !== mode.id &&
-          execute({ type: 'save', config: { ...state.config, mode: mode.id } })
+          execute({
+            type: 'save',
+            config: {
+              ...state.config,
+              mode: mode.id,
+              displayMethod: mode.id === 'display-only' ? 'ddc' : state.config.displayMethod,
+            },
+          })
         "
       >
         <AppIcon :name="mode.icon" :size="21" /><span

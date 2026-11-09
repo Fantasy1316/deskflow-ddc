@@ -80,11 +80,11 @@ impl Runtime {
         let this = self.clone();
         let context = link.clone();
         tokio::spawn(async move {
-            while let Some(change) = changes.recv().await {
+            while let Some((received, change)) = changes.recv().await {
                 if !this.current(&context) {
                     break;
                 }
-                this.observe_transition(&context, change).await;
+                this.observe_transition_at(&context, change, received).await;
             }
         });
         let this = self.clone();
@@ -97,6 +97,24 @@ impl Runtime {
                     break;
                 }
                 match event {
+                    engine::Event::ShortcutPressed(provider) => {
+                        if this.switch_protection.busy() {
+                            this.trace("switch.suppressed", json!({"entry":"nativeShortcut"}))
+                                .await;
+                            continue;
+                        }
+                        let runtime = this.clone();
+                        let session = context.clone();
+                        let received = std::time::Instant::now();
+                        tokio::spawn(async move {
+                            if let Err(error) = runtime
+                                .native_switch_shortcut_at(&session, &provider, received)
+                                .await
+                            {
+                                runtime.log("error", &format!("{error:#}")).await;
+                            }
+                        });
+                    }
                     engine::Event::Ipc(line) => {
                         if line == "observerDisconnected" {
                             this.log("error", "引擎状态通道已断开，已停止本次共享")
@@ -133,6 +151,12 @@ impl Runtime {
                     }
                     engine::Event::Output(line) => {
                         let lower = line.to_lowercase();
+                        // Keep input-capture lifecycle evidence without logging
+                        // ordinary keystrokes or publishing every engine line.
+                        if lower.contains("quartz event tap") || lower.contains("hotkey") {
+                            this.trace("engine.inputDiagnostic", json!({"line":line}))
+                                .await;
+                        }
                         if lower.contains("fingerprint does not match")
                             || lower.contains("failed to verify") && lower.contains("fingerprint")
                         {
@@ -143,7 +167,10 @@ impl Runtime {
                         if host {
                             if let Some(change) = parse_transition(&line) {
                                 let _ = this.observed.send((context.id, change.clone()));
-                                if transitions.try_send(change).is_err() {
+                                if transitions
+                                    .try_send((std::time::Instant::now(), change))
+                                    .is_err()
+                                {
                                     context.session.close();
                                     break;
                                 }
@@ -184,6 +211,39 @@ impl Runtime {
         });
         Ok(())
     }
+    #[cfg(test)]
+    pub(super) async fn native_switch_shortcut(
+        &self,
+        link: &Arc<Link>,
+        provider: &str,
+    ) -> Result<()> {
+        self.native_switch_shortcut_at(link, provider, std::time::Instant::now())
+            .await
+    }
+
+    async fn native_switch_shortcut_at(
+        &self,
+        link: &Arc<Link>,
+        provider: &str,
+        received: std::time::Instant,
+    ) -> Result<()> {
+        let s = self.snapshot().await;
+        let eligible = self.current(link)
+            && s.connected
+            && s.engine == "ready"
+            && s.config.role == "host"
+            && s.device_id == provider
+            && (s
+                .session_layout
+                .as_ref()
+                .is_some_and(|l| l.video == "manual")
+                || keep_mode(&s));
+        self.trace("shortcut.pressed", json!({"backend":"deskflowNative","active":s.active_device_id,"role":s.config.role,"eligible":eligible,"session":link.id})).await;
+        if eligible && !self.switch_protection.blocks(received) {
+            self.command_switch_target(link, None).await?;
+        }
+        Ok(())
+    }
     pub(super) async fn diagnostic_line(&self, line: &str) {
         let mut i = self.inner.lock().await;
         let now = std::time::Instant::now();
@@ -200,5 +260,150 @@ impl Runtime {
         i.diagnostic_line = Some((line.into(), 1, now));
         drop(i);
         self.log("error", line).await;
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn provider_native_shortcut_round_trips_without_receiver_callbacks_and_rejects_stale_events(
+    ) {
+        for mode in ["manual", "keep"] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "host");
+            let local = runtime.snapshot().await.device_id;
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.engine = "ready".into();
+                i.state.session_layout = Some(Layout {
+                    host_side: "left".into(),
+                    video: mode.into(),
+                });
+                i.state.config.cross_screen_video = mode.into();
+                i.state.config.display_id = "external".into();
+                i.state.config.local_input = Some(3);
+                i.state.config.peer_input = Some(1);
+                i.state.active_device_id = Some(local.clone());
+                i.state.display_device_id = Some(local.clone());
+                i.state.peer = Some(Peer {
+                    id: "receiver".into(),
+                    name: "Receiver".into(),
+                    platform: "darwin".into(),
+                    fingerprint: "a".repeat(64),
+                    file_transfer: false,
+                    lock_control: false,
+                    input_configured: true,
+                    retained_display: true,
+                    modifier_mapping: ModifierMapping::Common,
+                });
+            }
+            let native = runtime.platform.resources.join("native/bin");
+            std::fs::create_dir_all(&native).unwrap();
+            let input = native.join("mac-hotkey");
+            let ddc = native.join("m1ddc");
+            for (file, script) in [
+                (&input, "#!/bin/sh\ncase \"$1\" in host|peer) echo \"$1\" >> \"$0.calls\"; echo sent ;; *) exit 9 ;; esac\n"),
+                (&ddc, "#!/bin/sh\ntest \"$3\" = set || exit 9\necho \"$5\" >> \"$0.calls\"\n"),
+            ] {
+                std::fs::write(file, script).unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let (remote, mut requests) =
+                super::super::pointer_bridge::tests::attach_with_requests(&runtime).await;
+            let link = runtime.link.lock().await.clone().unwrap();
+            let replying = remote.clone();
+            let writes = Arc::new(AtomicU64::new(0));
+            let count = writes.clone();
+            let provider = local.clone();
+            let receiver = tokio::spawn(async move {
+                while let Some(event) = requests.recv().await {
+                    if let Incoming::Request {
+                        id,
+                        method,
+                        payload,
+                    } = event
+                    {
+                        assert_eq!(
+                            method, "set-input",
+                            "The receiver must not be asked to detect or relay the shortcut"
+                        );
+                        let next = count.fetch_add(1, Ordering::AcqRel);
+                        assert_eq!(
+                            payload,
+                            json!(if next % 2 == 0 { "receiver" } else { &provider })
+                        );
+                        replying.reply(id, Ok(json!(true))).await.unwrap();
+                    }
+                }
+            });
+            runtime
+                .native_switch_shortcut(&link, "wrong-provider")
+                .await
+                .unwrap();
+            assert!(!input.with_extension("calls").exists());
+            for step in 0..8 {
+                let target = if step % 2 == 0 {
+                    "receiver".to_owned()
+                } else {
+                    local.clone()
+                };
+                let rt = runtime.clone();
+                let context = link.clone();
+                let calls = input.with_extension("calls");
+                let to = target.clone();
+                let observation = tokio::spawn(async move {
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        while std::fs::read_to_string(&calls)
+                            .unwrap_or_default()
+                            .lines()
+                            .count()
+                            <= step
+                        {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let from = rt.snapshot().await.active_device_id.unwrap();
+                    rt.observe_transition(
+                        &context,
+                        Transition {
+                            from,
+                            to,
+                            position: None,
+                        },
+                    )
+                    .await;
+                });
+                runtime.native_switch_shortcut(&link, &local).await.unwrap();
+                observation.await.unwrap();
+                let s = runtime.snapshot().await;
+                assert_eq!(s.active_device_id.as_deref(), Some(target.as_str()));
+                assert_eq!(s.display_device_id.as_deref(), Some(target.as_str()));
+                assert!(!runtime.command_pending.load(Ordering::Acquire));
+            }
+            link.session.close();
+            runtime.native_switch_shortcut(&link, &local).await.unwrap();
+            assert_eq!(writes.load(Ordering::Acquire), 8);
+            assert_eq!(
+                std::fs::read_to_string(input.with_extension("calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                8
+            );
+            assert_eq!(
+                std::fs::read_to_string(ddc.with_extension("calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                8
+            );
+            remote.close();
+            receiver.await.unwrap();
+        }
     }
 }

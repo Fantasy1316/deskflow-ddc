@@ -5,6 +5,7 @@ import OperationModePicker from './OperationModePicker.vue'
 import type { ActionRunner } from '../shared/workspace'
 import type { Action } from '../shared/types'
 import WorkspaceOverview from './dashboard/WorkspaceOverview.vue'
+import DisplaySourcePicker from './dashboard/DisplaySourcePicker.vue'
 import type { Snapshot } from '../shared/types'
 import { deviceName, pictureCommandLabel } from '../shared/workspace'
 const props = defineProps<{
@@ -120,6 +121,7 @@ const shortcut = computed(() =>
       @lock-peer="$emit('lockPeer')"
       @navigate="$emit('navigate', $event)"
     />
+    <DisplaySourcePicker :state="state" :busy="busy" @action="$emit('action', $event)" />
     <section v-if="!ready" class="setup-guide panel" aria-labelledby="setup-title">
       <div class="section-heading">
         <h2 id="setup-title">{{ state.running ? '连接准备' : '开始使用' }}</h2>
@@ -195,7 +197,7 @@ const shortcut = computed(() =>
         </p>
       </article>
       <article class="status-card">
-        <span class="status-label"><AppIcon name="monitor" :size="18" />画面指令状态</span
+        <span class="status-label"><AppIcon name="monitor" :size="18" />画面来源状态</span
         ><strong>{{ picture }}</strong>
         <p>软件未确认物理画面，请以显示器实际显示为准。</p>
       </article>

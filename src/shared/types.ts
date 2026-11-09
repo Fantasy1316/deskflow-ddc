@@ -7,6 +7,8 @@ export interface StartupPreferences {
   autoShare: boolean
 }
 export interface Config {
+  displayMethod: 'ddc' | 'signal'
+  outputId: string
   mode: OperationMode
   deviceName: string
   role: Role
@@ -67,6 +69,20 @@ export interface DiscoveredDevice {
   addresses: string[]
   port: number
 }
+export type SwitchStage =
+  | 'restoring-target'
+  | 'transferring-input'
+  | 'disabling-source'
+  | 'committing'
+  | 'writing-input'
+  | 'waiting-display'
+  | 'restoring-outputs'
+export interface OutputDisplay extends CursorDisplay {
+  cursorId?: string
+  active?: boolean
+  mirrored?: boolean
+  unavailableReason?: string | null
+}
 export interface Snapshot {
   startup?: StartupPreferences
   startupRegistered?: boolean | null
@@ -90,12 +106,23 @@ export interface Snapshot {
   engine: 'stopped' | 'starting' | 'ready' | 'error'
   peer: Peer | null
   activeDeviceId: string | null
+  outputSwitch?: { token: string; target: string } | null
+  localOutputRecoveryPending?: boolean
+  outputDisplays?: OutputDisplay[]
+  outputCheck?: { id: string; available: boolean; detail: string } | null
   displayTarget?: 'local' | 'peer' | null
   displayDeviceId: string | null
+  switchProgress?: { stage: SwitchStage } | null
+  emergencyStopping?: boolean
   switching: boolean
   pairingCode: string
   hasSavedPairing: boolean
   displayStatus?: 'uninitialized' | 'commanded' | 'uncertain'
+  displaySource?:
+    | { kind: 'checking' }
+    | { kind: 'unknown'; reason: string }
+    | { kind: 'ddc' | 'manual'; device: string }
+    | null
   lastDisplayDeviceId?: string | null
   dependencies: { deskflow: boolean; displayControl: boolean; accessibility: boolean }
   diagnostics: { directory: string; error: string | null }

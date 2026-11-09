@@ -1,8 +1,47 @@
 use super::*;
+use std::time::Instant;
+
+const READBACK_GRACE: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+pub(super) struct ToggleHistory {
+    accepted: Option<AcceptedTarget>,
+}
+#[derive(Clone, Copy)]
+struct AcceptedTarget {
+    epoch: u64,
+    local: bool,
+    at: Instant,
+    confirmed: bool,
+}
+impl ToggleHistory {
+    fn record(&mut self, epoch: u64, local: bool, confirmed: bool) {
+        self.accepted = Some(AcceptedTarget {
+            epoch,
+            local,
+            at: Instant::now(),
+            confirmed,
+        });
+    }
+    fn pending(&self, epoch: u64, last: Option<&str>, now: Instant) -> bool {
+        self.accepted.is_some_and(|accepted| {
+            accepted.epoch == epoch
+                && last == Some(if accepted.local { "local" } else { "peer" })
+                && !accepted.confirmed
+                && now.saturating_duration_since(accepted.at) < READBACK_GRACE
+        })
+    }
+}
 
 // No remote identity is available in standalone mode. Never store a made-up
 // peer ID in display_device_id; it remains the full-sharing routing authority.
-fn toggle_target(config: &Config, current: Option<u16>, last: Option<&str>) -> bool {
+fn toggle_target(config: &Config, current: Option<u16>, last: Option<&str>, pending: bool) -> bool {
+    // A write can succeed while VCP still returns the old input. Until its
+    // readback is confirmed (or this short grace expires), reverse the accepted
+    // target. Once confirmed, a new reading can represent a physical OSD change.
+    if pending && last.is_some() {
+        return last == Some("peer");
+    }
     match current {
         Some(value) if Some(value) == config.local_input => false,
         Some(value) if Some(value) == config.peer_input => true,
@@ -13,6 +52,7 @@ impl Runtime {
     // Called with the lifecycle lock held, before any engine or network setup.
     pub(super) async fn start_display_only(&self) -> Result<()> {
         let state = self.snapshot().await;
+        ensure!(!state.emergency_stopping, "正在停止共享并恢复输出");
         ensure!(
             state.config.mode == OperationMode::DisplayOnly,
             "当前不是仅切换显示器模式"
@@ -24,6 +64,7 @@ impl Runtime {
         );
         self.discovery.lock().await.take();
         self.transfers.suspend().await;
+        *self.display_only_history.lock().await = ToggleHistory::default();
         {
             let mut i = self.inner.lock().await;
             i.state.control_disconnected();
@@ -43,6 +84,8 @@ impl Runtime {
             bail!("正在处理其他操作，请稍候再切换");
         };
         let state = self.snapshot().await;
+        ensure!(!state.emergency_stopping, "正在停止共享并恢复输出");
+        let epoch = self.epoch.load(Ordering::Acquire);
         ensure!(
             state.config.mode == OperationMode::DisplayOnly && state.running,
             "请先启用仅切换显示器"
@@ -64,7 +107,27 @@ impl Runtime {
                     )
                     .await;
                 }
-                toggle_target(&state.config, read, state.display_target.as_deref())
+                let pending = self.display_only_history.lock().await.pending(
+                    epoch,
+                    state.display_target.as_deref(),
+                    Instant::now(),
+                );
+                if pending && read.is_some() {
+                    let expected = if state.display_target.as_deref() == Some("local") {
+                        state.config.local_input
+                    } else {
+                        state.config.peer_input
+                    };
+                    if read != expected {
+                        self.log("info", "输入源读回值可能滞后，本次按最近已发送的目标反向切换；请以实际画面为准").await;
+                    }
+                }
+                toggle_target(
+                    &state.config,
+                    read,
+                    state.display_target.as_deref(),
+                    pending,
+                )
             }
         };
         let value = if local {
@@ -73,20 +136,47 @@ impl Runtime {
             state.config.peer_input
         }
         .context("输入源未配置")?;
+        let target = if local { "local" } else { "peer" };
+        let protection = self.switch_protection.enter(Some(target))?;
         {
             let mut i = self.inner.lock().await;
+            ensure!(self.epoch.load(Ordering::Acquire) == epoch, "切换已取消");
             i.state.switching = true;
+            i.state.switch_progress = Some(SwitchProgress {
+                stage: SwitchStage::WritingInput,
+            });
             i.state.display_target = None;
             i.state.display_device_id = None;
             i.state.display_status = "uncertain".into();
+            i.state.display_source = None;
         }
         self.publish();
         // The only device effect in this path. No network RPC, injection or
         // cursor movement, even if an old pairing/engine configuration exists.
-        let result = self.platform.input(&state.config.display_id, value).await;
+        let result = self
+            .platform
+            .input(&state.config.display_id, value)
+            .await
+            .context("发送输入源指令失败");
+        let confirmed = self
+            .settle_display(&protection, None, target, result.is_ok())
+            .await;
+        ensure!(
+            self.epoch.load(Ordering::Acquire) == epoch,
+            "切换已取消，正在恢复输出"
+        );
+        if result.is_ok() {
+            self.display_only_history
+                .lock()
+                .await
+                .record(epoch, local, confirmed);
+        } else {
+            *self.display_only_history.lock().await = ToggleHistory::default();
+        }
         {
             let mut i = self.inner.lock().await;
             i.state.switching = false;
+            i.state.switch_progress = None;
             if result.is_ok() {
                 i.state.display_target = Some(if local { "local" } else { "peer" }.into());
                 i.state.display_status = "commanded".into();
@@ -94,6 +184,7 @@ impl Runtime {
             } else {
                 i.state.last_error = result.as_ref().err().map(|e| e.to_string());
             }
+            drop(protection);
         }
         self.publish();
         self.trace("displayOnly.input", json!({"local":local,"value":value,"accepted":result.is_ok(),"pictureVerified":false,"error":result.as_ref().err().map(|e|e.to_string())})).await;
@@ -107,7 +198,7 @@ impl Runtime {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     #[test]
     fn toggle_prefers_read_value_then_last_command_and_handles_unknown() {
@@ -116,18 +207,57 @@ mod tests {
             peer_input: Some(17),
             ..Config::default()
         };
-        assert!(!toggle_target(&config, Some(15), Some("peer")));
-        assert!(toggle_target(&config, Some(17), Some("local")));
-        assert!(toggle_target(&config, None, Some("peer")));
-        assert!(!toggle_target(&config, None, Some("local")));
-        assert!(!toggle_target(&config, None, None));
-        assert!(!toggle_target(&config, Some(99), None));
+        assert!(!toggle_target(&config, Some(15), Some("peer"), false));
+        assert!(toggle_target(&config, Some(17), Some("local"), false));
+        assert!(toggle_target(&config, None, Some("peer"), false));
+        assert!(!toggle_target(&config, None, Some("local"), false));
+        assert!(!toggle_target(&config, None, None, false));
+        assert!(!toggle_target(&config, Some(99), None, false));
+    }
+    #[test]
+    fn stale_readback_round_trips_but_confirmed_expired_or_new_session_reads_win() {
+        let config = Config {
+            local_input: Some(15),
+            peer_input: Some(17),
+            ..Config::default()
+        };
+        for stale in [15, 17] {
+            let mut history = ToggleHistory::default();
+            let mut last = None;
+            let mut targets = Vec::new();
+            for _ in 0..4 {
+                let pending = history.pending(1, last, Instant::now());
+                let local = toggle_target(&config, Some(stale), last, pending);
+                targets.push(if local { 15 } else { 17 });
+                history.record(1, local, false);
+                last = Some(if local { "local" } else { "peer" });
+            }
+            assert_eq!(
+                targets,
+                if stale == 15 {
+                    vec![17, 15, 17, 15]
+                } else {
+                    vec![15, 17, 15, 17]
+                }
+            );
+        }
+        let mut history = ToggleHistory::default();
+        history.record(1, false, false);
+        assert!(history.pending(1, Some("peer"), Instant::now()));
+        assert!(!history.pending(2, Some("peer"), Instant::now()));
+        assert!(!history.pending(1, None, Instant::now()));
+        assert!(!history.pending(1, Some("peer"), Instant::now() + READBACK_GRACE));
+        history.record(1, false, true);
+        assert!(!history.pending(1, Some("peer"), Instant::now()));
+        assert!(!toggle_target(&config, Some(15), Some("peer"), false));
     }
     #[cfg(target_os = "macos")]
-    async fn standalone_fixture() -> (tempfile::TempDir, Arc<Runtime>) {
+    pub(in crate::runtime) async fn standalone_fixture() -> (tempfile::TempDir, Arc<Runtime>) {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "client");
+        let mut runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "client");
+        Arc::get_mut(&mut runtime).unwrap().switch_protection =
+            super::super::switch_protection::Protection::short_readback_wait();
         runtime.stop().await.unwrap();
         {
             let mut i = runtime.inner.lock().await;
@@ -209,7 +339,8 @@ fi
             Some("local")
         );
         let bin = runtime.platform.resources.join("native/bin");
-        // Physical input changed independently: current VCP wins over history.
+        // The mock monitor has acknowledged the local write during settling.
+        // A subsequent physical OSD change must win over that confirmed history.
         std::fs::write(bin.join("current"), "17").unwrap();
         runtime.toggle().await.unwrap();
         assert_eq!(
@@ -239,6 +370,30 @@ fi
         assert!(writes
             .lines()
             .all(|line| line.starts_with("display fake-monitor set input ")));
+        runtime.stop().await.unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn standalone_hotkey_reverses_unconfirmed_commands_despite_repeated_old_vcp() {
+        let (_directory, runtime) = standalone_fixture().await;
+        let bin = runtime.platform.resources.join("native/bin");
+        let helper = bin.join("m1ddc");
+        // Writes are accepted but every get keeps returning the old local input.
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\nif [ \"$3\" = get ]; then echo 15; else echo \"$5\" >> \"$0.writes\"; fi\n",
+        )
+        .unwrap();
+        runtime.start(None).await.unwrap();
+        for _ in 0..4 {
+            runtime.toggle().await.unwrap();
+        }
+        let writes = std::fs::read_to_string(bin.join("m1ddc.writes")).unwrap();
+        assert_eq!(
+            writes.lines().collect::<Vec<_>>(),
+            vec!["17", "15", "17", "15"]
+        );
+        assert!(runtime.engine.lock().await.is_none() && runtime.link.lock().await.is_none());
         runtime.stop().await.unwrap();
     }
     #[cfg(target_os = "macos")]

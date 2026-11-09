@@ -1399,8 +1399,8 @@ kbd {
   padding: 20px;
   border: 1px solid #e5c7a4;
   background: #fff9f0;
-  border-radius: 10px;
-  margin-bottom: 24px;
+  border-radius: 14px;
+  margin: 0;
   color: #825a33;
 }
 .runtime-error > svg {
@@ -1416,6 +1416,7 @@ kbd {
 }
 .error-body p {
   font-size: 12px;
+  overflow-wrap: anywhere;
   margin-top: 6px;
 }
 .error-body details {
@@ -1729,7 +1730,7 @@ summary {
 .recovery-popover {
   position: absolute;
   right: 0;
-  top: 36px;
+  top: calc(100% + 10px);
   width: min(340px, calc(100vw - 110px));
   background: #fff;
   padding: 20px;
@@ -1739,11 +1740,24 @@ summary {
   z-index: 30;
   color: #3e5547;
 }
+.recovery-popover::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  right: 19px;
+  width: 10px;
+  height: 10px;
+  background: inherit;
+  border-top: 1px solid #d8e2d9;
+  border-left: 1px solid #d8e2d9;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
 .recovery-popover p {
   margin: 10px 0;
   font-size: 12px;
 }
 .recovery-popover kbd {
-  display: inline-block;
   font-size: 11px;
+  vertical-align: 2px;
 }

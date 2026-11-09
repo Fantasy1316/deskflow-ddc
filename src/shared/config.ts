@@ -17,6 +17,12 @@ export const configSchema = z.preprocess(
   },
   z
     .object({
+      displayMethod: z.enum(['ddc', 'signal']).default('ddc'),
+      outputId: z
+        .string()
+        .max(128)
+        .refine((v) => !/[\r\n\0]/.test(v))
+        .default(''),
       mode: z.enum(['sharing', 'display-only']).default('sharing'),
       deviceName: z
         .string()
@@ -58,9 +64,14 @@ export const configSchema = z.preprocess(
     })
     .strict()
     .superRefine((c, ctx) => {
+      if (c.displayMethod === 'signal' && (c.mode !== 'sharing' || c.crossScreenVideo !== 'manual'))
+        ctx.addIssue({
+          code: 'custom',
+          message: '自动选源兜底需要联网共享，画面仅由快捷键或按钮切换',
+        })
       if (c.controlPort === c.deskflowPort)
         ctx.addIssue({ code: 'custom', message: '控制端口和键鼠端口必须不同' })
-      if (c.localInput !== null && c.localInput === c.peerInput)
+      if (c.displayMethod === 'ddc' && c.localInput !== null && c.localInput === c.peerInput)
         ctx.addIssue({ code: 'custom', message: '两台电脑的输入源数值必须不同' })
     }),
 )
@@ -68,6 +79,8 @@ export const configSchema = z.preprocess(
 /** Frontend-only initial state; the desktop backend supplies persisted settings. */
 export function defaultConfig(deviceName: string): Config {
   return {
+    displayMethod: 'ddc',
+    outputId: '',
     mode: 'sharing',
     deviceName,
     role: 'host',

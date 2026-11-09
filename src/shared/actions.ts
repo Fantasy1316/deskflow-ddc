@@ -11,9 +11,15 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('save'), config: configSchema }).strict(),
   z.object({ type: z.literal('start'), pairingCode: z.string().max(128).optional() }).strict(),
   z.object({ type: z.literal('switch'), target: z.enum(['local', 'peer']) }).strict(),
+  z.object({ type: z.literal('confirmDisplaySource'), target: z.enum(['local', 'peer']) }).strict(),
+  z.object({ type: z.literal('restoreOutput'), token: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('scanDisplays'), method: z.enum(['ddc', 'signal']) }).strict(),
   z.object({ type: z.literal('testInput'), value: z.number().int().min(0).max(65535) }).strict(),
   ...(
     [
+      'checkOutput',
+      'detectDisplaySource',
+      'emergencyStop',
       'lockPeer',
       'installWindowsService',
       'removeWindowsService',

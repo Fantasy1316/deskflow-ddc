@@ -1,4 +1,4 @@
-param([ValidateSet('list','get','set','host','peer','pointer','screens','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
+﻿param([ValidateSet('list','get','set','host','peer','pointer','screens','serve')][string]$Action = 'list', [string]$MonitorId = '', [int]$Value = 0, [int]$X = 0, [int]$Y = 0)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 Add-Type -TypeDefinition @'
@@ -21,6 +21,72 @@ public static class ScreenBridgeNative {
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string key;
   }
   public class Item { public string id; public string name; public uint? currentInput; public bool readable; }
+  [StructLayout(LayoutKind.Sequential)] public struct Luid { public uint low; public int high; }
+  [StructLayout(LayoutKind.Sequential)] public struct Source { public Luid adapter; public uint id, mode, status; }
+  [StructLayout(LayoutKind.Sequential)] public struct Rate { public uint numerator, denominator; }
+  [StructLayout(LayoutKind.Sequential)] public struct Target { public Luid adapter; public uint id, mode, technology, rotation, scaling; public Rate rate; public uint scanline; public int available; public uint status; }
+  [StructLayout(LayoutKind.Sequential)] public struct DisplayPath { public Source source; public Target target; public uint flags; }
+  [StructLayout(LayoutKind.Sequential, Size=64)] public struct DisplayMode {
+    public uint type, id; public Luid adapter;
+    // The native mode union contains a 64-bit pixel rate: preserve its alignment.
+    public ulong a, b, c, d, e, f;
+  }
+
+  [DllImport("user32.dll")] private static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+  [DllImport("user32.dll")] private static extern int QueryDisplayConfig(uint flags, ref uint count, [Out] DisplayPath[] paths, ref uint modeCount, [Out] DisplayMode[] modes, IntPtr topology);
+  [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+  // Monitor power is global. Only accept a single active, non-cloned output;
+  // never put a user's independent screen to sleep as a side effect.
+  public class SignalOutput { public string method="monitor-sleep-input-v1"; public string output; }
+  public static void ValidateSignalOutput(List<Panel> panels, uint activePaths, string output) {
+    if(panels.Count!=1 || activePaths!=1) throw new Exception("Windows signal fallback requires exactly one active output; multiple screens or mirrored outputs must use DDC");
+    if(panels[0].id!=output || panels[0].@internal) throw new Exception("Select the active external output again");
+  }
+  public static bool ExternalSignalConnector(uint technology) {
+    // LVDS, embedded DisplayPort/UDI and INTERNAL are laptop/internal outputs.
+    return technology!=6 && technology!=11 && technology!=13 && technology!=0x80000000;
+  }
+  public static SignalOutput CaptureSignalOutput(string output) {
+    var panels=Screens();
+    for(int retry=0;retry<3;retry++) {
+      uint count,modes; int error=GetDisplayConfigBufferSizes(2,out count,out modes);
+      if(error!=0) throw new Win32Exception(error);
+      if(count>64 || modes>256) throw new Exception("Display topology is too large");
+      var paths=new DisplayPath[count]; var modeInfo=new DisplayMode[modes];
+      error=QueryDisplayConfig(2,ref count,paths,ref modes,modeInfo,IntPtr.Zero);
+      if(error==122) continue;
+      if(error!=0) throw new Win32Exception(error);
+      ValidateSignalOutput(panels,count,output);
+      if(!ExternalSignalConnector(paths[0].target.technology)) throw new Exception("Internal display cannot be selected as the shared signal output");
+      return new SignalOutput {output=output};
+    }
+    throw new Exception("Display topology changed; retry after it stabilizes");
+  }
+  public static void MonitorPower(bool enable) {
+    UIntPtr result;
+    if(SendMessageTimeout(new IntPtr(0xffff),0x0112,new UIntPtr(0xf170),new IntPtr(enable ? -1 : 2),2,2000,out result)==IntPtr.Zero) {
+      int error=Marshal.GetLastWin32Error();
+      throw new Win32Exception(error,"Monitor power request timed out/rejected; error="+error);
+    }
+  }
+  public static object ApplySignalOutput(string method, string output, bool enable) {
+    if(method!="monitor-sleep-input-v1") throw new Exception("Invalid signal recovery baseline");
+    if(!enable) {
+      CaptureSignalOutput(output); // Revalidate immediately before global sleep.
+      MonitorPower(false);
+      return new {commandAccepted=true,pictureVerified=false};
+    }
+    // Restoration must still wake output if enumeration is transiently empty
+    // or topology changed while asleep. It never removes/changes any path.
+    string wakeError=null;
+    try {MonitorPower(true);} catch(Exception error) {wakeError=error.Message;}
+    var move=WakeInput();
+    if(SendInput(1,new Input[] {move},Marshal.SizeOf(typeof(Input)))!=1) {
+      int error=Marshal.GetLastWin32Error();
+      throw new Win32Exception(error,"Software wake input rejected; error="+error+"; monitorWake="+wakeError);
+    }
+    return new {commandAccepted=true,inputAccepted=true,monitorWakeError=wakeError,pictureVerified=false};
+  }
   private delegate bool Callback(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr data);
   [DllImport("user32.dll")] private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, Callback callback, IntPtr data);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="GetMonitorInfoW")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
@@ -30,10 +96,14 @@ public static class ScreenBridgeNative {
   [DllImport("dxva2.dll", SetLastError=true)] private static extern bool DestroyPhysicalMonitors(uint count, Physical[] monitors);
   [DllImport("dxva2.dll", SetLastError=true)] private static extern bool GetVCPFeatureAndVCPFeatureReply(IntPtr monitor, byte code, out uint type, out uint current, out uint max);
   [DllImport("dxva2.dll", SetLastError=true)] private static extern bool SetVCPFeature(IntPtr monitor, byte code, uint value);
-  [StructLayout(LayoutKind.Sequential)] private struct Input { public uint type; public InputUnion union; }
-  [StructLayout(LayoutKind.Explicit)] private struct InputUnion { [FieldOffset(0)] public Keyboard keyboard; [FieldOffset(0)] public Mouse mouse; }
-  [StructLayout(LayoutKind.Sequential)] private struct Keyboard { public ushort vk, scan; public uint flags, time; public UIntPtr extra; }
-  [StructLayout(LayoutKind.Sequential)] private struct Mouse { public int x,y; public uint data,flags,time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] public struct Input { public uint type; public InputUnion union; }
+  [StructLayout(LayoutKind.Explicit)] public struct InputUnion { [FieldOffset(0)] public Keyboard keyboard; [FieldOffset(0)] public Mouse mouse; }
+  [StructLayout(LayoutKind.Sequential)] public struct Keyboard { public ushort vk, scan; public uint flags, time; public UIntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] public struct Mouse { public int x,y; public uint data,flags,time; public UIntPtr extra; }
+  public static Input WakeInput() {
+    // One relative mouse move of (0,0); no key/button events or cursor warp.
+    return new Input {type=0,union=new InputUnion {mouse=new Mouse {flags=1,extra=new UIntPtr(0x44445052)}}};
+  }
   [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -133,8 +203,22 @@ public static class ScreenBridgeNative {
   }
 }
 '@
-function Invoke-NativeCommand([string]$Command, [string]$Monitor, [int]$InputValue, [int]$PointerX, [int]$PointerY) {
+function Invoke-NativeCommand([string]$Command, [string]$Monitor, [int]$InputValue, [int]$PointerX, [int]$PointerY, $Topology = $null) {
   switch ($Command) {
+    'output-options' {
+      $items = [ScreenBridgeNative]::Screens()
+      $choices = @($items.ToArray() | ForEach-Object {
+        $reason = $null
+        if ($_.internal) { $reason = '内置屏不能作为允许断开的共用输出' }
+        elseif ($items.Count -ne 1) { $reason = 'Windows 自动选源仅支持一块活动外接输出，多屏请使用 DDC' }
+        else { try { [void][ScreenBridgeNative]::CaptureSignalOutput($_.id) } catch { $reason = $_.Exception.Message } }
+        @{ id = $_.id; name = $_.name; internal = $_.internal; active = $true; bounds = $_.bounds; unavailableReason = $reason }
+      })
+      return ,$choices
+    }
+    'output-capture' { return [ScreenBridgeNative]::CaptureSignalOutput($Monitor) }
+    'output-disable' { return [ScreenBridgeNative]::ApplySignalOutput([string]$Topology.method, [string]$Topology.output, $false) }
+    'output-restore' { return [ScreenBridgeNative]::ApplySignalOutput([string]$Topology.method, [string]$Topology.output, $true) }
     'screens' { $items = [ScreenBridgeNative]::Screens(); return ,@($items.ToArray()) }
     'list' { $items = [ScreenBridgeNative]::Monitors('', $null); return ,@($items.ToArray()) }
     'get' { $items = [ScreenBridgeNative]::Monitors($Monitor, $null); if ($items.Count -eq 1) { return $items[0].currentInput }; return $null }
@@ -152,13 +236,13 @@ try {
     while ($null -ne ($line = [Console]::ReadLine())) {
       $request = $null
       try {
-        if ($line.Length -gt 16384) { throw 'Native request too large' }
+        if ($line.Length -gt 262144) { throw 'Native request too large' }
         $request = ConvertFrom-Json -InputObject $line
-        if ($null -eq $request.id -or $request.action -notin @('list','get','set','host','peer','pointer','screens')) { throw 'Invalid native request' }
-        $result = Invoke-NativeCommand $request.action $request.monitorId $request.value $request.x $request.y
+        if ($null -eq $request.id -or $request.action -notin @('list','get','set','host','peer','pointer','screens','output-options','output-capture','output-disable','output-restore')) { throw 'Invalid native request' }
+        $result = Invoke-NativeCommand $request.action $request.monitorId $request.value $request.x $request.y $request.topology
         $response = @{ id = $request.id; ok = $true; result = $result }
       } catch { $response = @{ id = $request.id; ok = $false; error = $_.Exception.Message } }
-      [Console]::Out.WriteLine((ConvertTo-Json -InputObject $response -Depth 6 -Compress))
+      [Console]::Out.WriteLine((ConvertTo-Json -InputObject $response -Depth 12 -Compress))
       [Console]::Out.Flush()
     }
   } else {

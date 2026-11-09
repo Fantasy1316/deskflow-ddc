@@ -27,6 +27,81 @@ async fn wait_topology(mut ready: watch::Receiver<bool>, cancelled: &Cancellatio
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn real_receiver_accepts_retained_landing_in_all_video_modes_but_rejects_invalid_targets()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = super::super::pointer_bridge::tests::fixture(dir.path(), "client");
+        let remote = super::super::pointer_bridge::tests::attach_with_requests(&runtime)
+            .await
+            .0;
+        let link = runtime.link.lock().await.clone().unwrap();
+        let mut host = super::super::tests::peer();
+        host.role = "host".into();
+        link.peer.send_replace(Some(host.clone()));
+        let helper = runtime.platform.resources.join("native/bin/mac-hotkey");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, "#!/bin/sh\n[ \"$1\" = pointer ] || exit 9\necho \"$*\" >> \"$0.calls\"\necho positioned\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for video in ["follow", "manual", "keep"] {
+            runtime.inner.lock().await.state.session_layout = Some(Layout {
+                host_side: "left".into(),
+                video: video.into(),
+            });
+            assert_eq!(
+                runtime
+                    .request(&link, "land-pointer", Value::Null)
+                    .await
+                    .unwrap(),
+                json!(true)
+            );
+        }
+        runtime.inner.lock().await.state.config.retained_display_id = "missing".into();
+        assert!(runtime
+            .request(&link, "land-pointer", Value::Null)
+            .await
+            .is_err());
+        runtime.inner.lock().await.state.config.retained_display_id = "internal".into();
+        runtime
+            .inner
+            .lock()
+            .await
+            .state
+            .session_layout
+            .as_mut()
+            .unwrap()
+            .host_side = "off".into();
+        assert!(runtime
+            .request(&link, "land-pointer", Value::Null)
+            .await
+            .is_err());
+        runtime
+            .inner
+            .lock()
+            .await
+            .state
+            .session_layout
+            .as_mut()
+            .unwrap()
+            .host_side = "left".into();
+        host.role = "client".into();
+        link.peer.send_replace(Some(host));
+        assert!(runtime
+            .request(&link, "land-pointer", Value::Null)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(helper.with_extension("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
+        remote.close();
+    }
+
     #[tokio::test]
     async fn waits_for_delayed_reciprocal_identification_without_missing_completion() {
         let (identified, peer) = watch::channel(None);
@@ -270,15 +345,44 @@ impl Runtime {
                         method,
                         payload,
                     } => {
+                        if matches!(
+                            method.as_str(),
+                            "switch"
+                                | "toggle"
+                                | "confirm-display-source"
+                                | "detect-display-source"
+                        ) && this.switch_protection.busy()
+                        {
+                            let _ = context
+                                .session
+                                .reply(
+                                    id,
+                                    Err(anyhow::anyhow!("正在切换或等待显示器稳定，请稍后重试")),
+                                )
+                                .await;
+                            continue;
+                        }
                         let Ok(permit) = limit.clone().try_acquire_owned() else {
                             context.session.close();
                             break;
                         };
                         let this = this.clone();
                         let link = context.clone();
+                        let received = std::time::Instant::now();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            let result = this.request(&link, &method, payload).await;
+                            let result = if matches!(
+                                method.as_str(),
+                                "switch"
+                                    | "toggle"
+                                    | "confirm-display-source"
+                                    | "detect-display-source"
+                            ) && this.switch_protection.blocks(received)
+                            {
+                                Err(anyhow::anyhow!("正在切换或等待显示器稳定，请稍后重试"))
+                            } else {
+                                this.request(&link, &method, payload).await
+                            };
                             let _ = link.session.reply(id, result).await;
                         });
                     }
@@ -341,9 +445,15 @@ impl Runtime {
         self.log("success", &format!("已与 {} 建立加密连接", peer.name))
             .await;
         if self.snapshot().await.config.role == "host" {
-            // The host retains the authoritative picture state across reconnects.
-            // The reciprocal identify response proves the receiver can accept it.
-            self.publish_control(link, None).await;
+            // Both identities/configurations are available before querying.
+            // Reading must not require starting or transferring keyboard input.
+            if let Err(error) = self.initialize_display_source(link).await {
+                self.trace(
+                    "display.initialSourceSkipped",
+                    json!({"error":error.to_string()}),
+                )
+                .await;
+            }
         }
         self.start_engine(link, &peer, address).await?;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
@@ -378,6 +488,14 @@ impl Runtime {
         // command must not change the picture after the new session starts.
         let _command = self.commands.lock().await;
         let _effects = self.effects.lock().await;
+        self.switch_protection.wait_released().await;
+        if !self.session_matches(epoch, id) {
+            return;
+        }
+        if let Err(error) = self.restore_local_output().await {
+            self.log("error", &format!("共享结束后恢复显示输出失败：{error:#}"))
+                .await;
+        }
         {
             let mut guard = self.engine.lock().await;
             if !self.session_matches(epoch, id) {
@@ -397,6 +515,9 @@ impl Runtime {
         let mut i = self.inner.lock().await;
         if !self.session_matches(epoch, id) {
             return;
+        }
+        if i.state.config.display_method == DisplayMethod::Signal {
+            i.state.reset_display();
         }
         i.state.control_disconnected();
         self.active_session
@@ -486,6 +607,19 @@ impl Runtime {
                 Ok(json!(true))
             }
             "ping" => Ok(json!("pong")),
+            "detect-display-source" => {
+                ensure!(
+                    self.snapshot().await.config.role == "host",
+                    "只有提供端可以协调来源检测"
+                );
+                self.detect_display_source().await?;
+                Ok(json!(true))
+            }
+            "confirm-display-source" => {
+                self.confirm_display_source_on(link, target_id(&payload)?)
+                    .await?;
+                Ok(json!(true))
+            }
             "lock-session" => {
                 let s = self.snapshot().await;
                 ensure!(
@@ -505,7 +639,36 @@ impl Runtime {
                     .await;
                 Ok(json!(true))
             }
+            "output-action" => {
+                ensure!(
+                    peer.output_protocol == crate::output_guard::PROTOCOL
+                        && peer.display_method == DisplayMethod::Signal
+                        && peer.role == "host",
+                    "不允许的显示输出请求"
+                );
+                let operation = payload.as_str().context("显示输出指令无效")?;
+                let _effects = self.effects.lock().await;
+                ensure!(self.current(link), "共享会话已结束");
+                self.local_output_action(operation).await?;
+                Ok(json!(true))
+            }
+            "restore-output" => {
+                ensure!(
+                    peer.role == "client"
+                        && peer.output_protocol == crate::output_guard::PROTOCOL
+                        && peer.display_method == DisplayMethod::Signal
+                        && self.snapshot().await.config.role == "host",
+                    "不允许的显示输出恢复请求"
+                );
+                let request: output_switch::RestoreRequest = serde_json::from_value(payload)?;
+                self.restore_output(request).await?;
+                Ok(json!(true))
+            }
             "get-input-source" => {
+                ensure!(
+                    self.snapshot().await.config.display_method == DisplayMethod::Ddc,
+                    "自动选源模式不读取 DDC 输入"
+                );
                 let source = self.read_display_source(&peer.id.to_string()).await?;
                 ensure!(self.current(link), "共享会话已结束");
                 Ok(json!(source))
@@ -531,8 +694,8 @@ impl Runtime {
                 let target = target_id(&payload)?;
                 let s = self.snapshot().await;
                 ensure!(
-                    s.config.role == "client",
-                    "只有接收端执行提供端的远程显示器指令"
+                    s.config.role == "client" && s.config.display_method == DisplayMethod::Ddc,
+                    "只有 DDC 接收端执行提供端的远程显示器指令"
                 );
                 let _effects = self.effects.lock().await;
                 ensure!(self.current(link), "共享会话已结束");
@@ -567,10 +730,28 @@ impl Runtime {
                 let _effects = self.effects.lock().await;
                 let s = self.snapshot().await;
                 ensure!(
-                    s.config.role == "client" && keep_mode(&s),
+                    s.config.role == "client"
+                        && peer.role == "host"
+                        && s.connected
+                        && s.session_layout
+                            .as_ref()
+                            .is_some_and(|l| l.host_side != "off"),
                     "当前没有启用独立屏幕跨屏"
                 );
+                // The provider also lands on a retained screen while follow
+                // mode is settling. Video policy is decided there; land() still
+                // requires an available, explicitly selected retained screen.
                 self.land(link.id).await?;
+                Ok(json!(true))
+            }
+            "place-shared-pointer" => {
+                let _effects = self.effects.lock().await;
+                ensure!(
+                    self.snapshot().await.config.role == "client" && peer.role == "host",
+                    "只有接收端接受提供端的鼠标落点请求"
+                );
+                let position: f64 = serde_json::from_value(payload)?;
+                self.place_shared_pointer(link, position).await?;
                 Ok(json!(true))
             }
             "cross-screen" => {
@@ -581,7 +762,10 @@ impl Runtime {
                         && s.active_device_id.as_deref() == Some(&peer.id.to_string()),
                     "当前不能跨屏"
                 );
-                self.keyboard_switch(link, s.device_id, None).await?;
+                // Null remains accepted for older peers; new peers preserve
+                // the crossing fraction when the native edge is gated.
+                let position: Option<f64> = serde_json::from_value(payload)?;
+                self.keyboard_switch(link, s.device_id, position).await?;
                 Ok(json!(true))
             }
             "switch" => {
@@ -600,6 +784,9 @@ impl Runtime {
             self.current(link) && link.peer.borrow().is_some(),
             "尚未识别对端设备"
         );
+        if name == "display-source" {
+            return self.receive_display_source(link, payload).await;
+        }
         if name == "display-state" && self.snapshot().await.config.role == "client" {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -610,6 +797,10 @@ impl Runtime {
                 last_display: Option<String>,
                 busy: bool,
                 error: Option<String>,
+                #[serde(default)]
+                output_switch: Option<output_switch::SwitchRecord>,
+                #[serde(default)]
+                switch_progress: Option<SwitchProgress>,
             }
             let v: RemoteState = serde_json::from_value(payload)?;
             let mut i = self.inner.lock().await;
@@ -635,9 +826,25 @@ impl Runtime {
                 ["commanded", "uninitialized", "uncertain"].contains(&status.as_str()),
                 "无效的画面状态"
             );
+            if let Some(completed) = &v.output_switch {
+                ensure!(
+                    i.state.config.display_method == DisplayMethod::Signal
+                        && (completed.target == i.state.device_id
+                            || i.state
+                                .peer
+                                .as_ref()
+                                .is_some_and(|p| p.id == completed.target)),
+                    "无效的输出切换状态"
+                );
+            }
+            i.state.output_switch = v.output_switch;
+            if !i.state.emergency_stopping {
+                i.state.switch_progress = v.switch_progress;
+            }
             i.state.active_device_id = v.active;
             i.state.display_device_id = v.display;
             i.state.display_status = status;
+            i.state.display_source = None;
             i.state.last_display_device_id = v.last_display;
             i.state.switching = v.busy;
             drop(i);

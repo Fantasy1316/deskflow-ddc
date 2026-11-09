@@ -5,6 +5,7 @@ import AppIcon from './components/AppIcon.vue'
 import appIcon from './assets/app-icon.png'
 import Dashboard from './components/Dashboard.vue'
 import RuntimeError from './components/RuntimeError.vue'
+import OutputRecovery from './components/OutputRecovery.vue'
 import RecoveryHelp from './components/RecoveryHelp.vue'
 import PairingPanel from './components/PairingPanel.vue'
 import DisplayPanel from './components/DisplayPanel.vue'
@@ -19,6 +20,7 @@ const {
   state,
   loading,
   busy,
+  emergencyBusy,
   pendingAction,
   notice,
   noticeError,
@@ -127,18 +129,20 @@ const on = computed(() =>
         <div class="topbar-actions">
           <span :class="['status-pill', { online: on }]"><i></i>{{ connectionLabel }}</span>
           <button
-            v-if="state.running"
+            v-if="state.running || state.switching || emergencyBusy"
             class="button secondary compact stop-sharing"
-            :disabled="busy"
-            @click="act({ type: 'stop' })"
+            :disabled="emergencyBusy"
+            @click="act({ type: 'emergencyStop' })"
           >
-            <AppIcon name="power" :size="16" />{{ displayOnly ? '停用切换' : '停止共享' }}
+            <AppIcon name="power" :size="16" />{{
+              emergencyBusy ? '正在恢复…' : displayOnly ? '停用切换' : '停止共享并恢复输出'
+            }}
           </button>
           <RecoveryHelp
             :display-only="displayOnly"
             :running="state.running"
-            :busy="busy"
-            @stop="act({ type: 'stop' })"
+            :busy="emergencyBusy"
+            @stop="act({ type: 'emergencyStop' })"
           />
         </div>
       </header>
@@ -147,6 +151,12 @@ const on = computed(() =>
           <AppIcon name="monitor" :size="15" /> 浏览器预览 · 显示器、网络与键鼠操作需要打开桌面 App
         </div>
         <main class="content">
+          <OutputRecovery
+            :state="state"
+            :busy="busy"
+            :emergency-busy="emergencyBusy"
+            @action="act"
+          />
           <RuntimeError
             v-if="failure"
             :failure="failure"
@@ -154,9 +164,12 @@ const on = computed(() =>
             :busy="busy"
             :running="state.running"
             :preview="state.preview"
+            :emergency-busy="emergencyBusy"
+            :restore-token="state.outputSwitch?.token"
+            @action="act"
             @dismiss="dismissFailure"
             @export="act({ type: 'exportDiagnostics' })"
-            @stop="act({ type: 'stop' })"
+            @stop="act({ type: 'emergencyStop' })"
             @navigate="page = $event"
           />
           <div v-if="loading" class="empty-state">正在读取设备状态…</div>

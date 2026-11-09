@@ -1,4 +1,5 @@
 use crate::model::platform;
+mod output;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 use std::{path::PathBuf, process::Stdio, time::Duration};
@@ -294,14 +295,18 @@ impl Platform {
         .context("读取显示器输入源超时")??;
         Ok(parse_input(&output))
     }
-    pub async fn inject(&self, host: bool) -> Result<()> {
+    pub async fn input_diagnostics(&self) -> Result<Value> {
+        ensure!(platform() == "darwin", "当前系统不支持此项键鼠诊断");
+        let output = self.run(self.input_helper(), &["diagnose".into()]).await?;
+        Ok(serde_json::from_str(&output)?)
+    }
+    pub async fn inject(&self, host: bool) -> Result<String> {
         let target = if host { "host" } else { "peer" };
         if platform() == "win32" {
-            self.win(target, serde_json::json!({})).await?;
+            Ok(self.win(target, serde_json::json!({})).await?.to_string())
         } else {
-            self.run(self.input_helper(), &[target.into()]).await?;
+            self.run(self.input_helper(), &[target.into()]).await
         }
-        Ok(())
     }
     pub async fn point(&self, x: f64, y: f64) -> Result<()> {
         ensure!(x.is_finite() && y.is_finite(), "坐标无效");
