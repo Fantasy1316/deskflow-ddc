@@ -35,6 +35,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
+      GH_TOKEN: ${{ github.token }}
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4

@@ -36,6 +36,7 @@ jobs:
             name: windows-x64
     runs-on: ${{ matrix.os }}
     env:
+      GH_TOKEN: ${{ github.token }}
       # Keep Tauri's official source and hash checks, but request fresh release redirects.
       TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE: https://github.com/<owner>/<repo>/releases/download/<version>/<asset>?deskflow-ddc-ci=${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -52,12 +53,20 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: engine-cache
         with:
           path: .engine-cache
-          key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/download-verified.mjs') }}
+          key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/prepare-windows-bundler.mjs', 'scripts/download-verified.mjs') }}
       - run: node --test scripts/download-verified.test.mjs
       - run: pnpm prepare:engine
+      - if: runner.os == 'Windows'
+        run: node scripts/prepare-windows-bundler.mjs
+      - uses: actions/cache/save@v4
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        with:
+          path: .engine-cache
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
       - run: pnpm typecheck
       - run: pnpm build:web
       - run: pnpm test

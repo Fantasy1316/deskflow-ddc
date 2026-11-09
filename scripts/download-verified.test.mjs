@@ -81,12 +81,13 @@ test('rejects a corrupt response without replacing a cached file or retrying its
   assert.equal(existsSync(target + '.download'), false)
 })
 
-test('cleans partial downloads when both official requests fail', (t) => {
+test('cleans partial downloads when all official download paths fail', (t) => {
   const options = fixture(t)
   let downloads = 0
   assert.throws(
     () =>
-      downloadVerified(options, (_tool, args) => {
+      downloadVerified(options, (tool, args) => {
+        if (tool === 'gh') throw new Error('HTTP 504')
         downloads++
         writeFileSync(args.at(-1), 'partial')
         throw new Error('HTTP 504')
@@ -95,6 +96,54 @@ test('cleans partial downloads when both official requests fail', (t) => {
   )
   assert.equal(downloads, 2)
   assert.equal(existsSync(join(options.cache, options.name)), false)
+  assert.equal(existsSync(join(options.cache, options.name + '.download')), false)
+})
+
+test('uses the official asset API when both release URLs fail', (t) => {
+  const options = fixture(t)
+  const apiRequests = []
+  downloadVerified(options, (tool, args, execOptions) => {
+    if (tool === 'curl') throw new Error('HTTP 504')
+    assert.equal(tool, 'gh')
+    apiRequests.push(args)
+    if (apiRequests.length === 1) {
+      assert.equal(args[1], 'repos/deskflow/deskflow/releases/tags/v1')
+      return JSON.stringify({ assets: [{ id: 123, name: 'engine.zip' }] })
+    }
+    assert.equal(args[1], 'repos/deskflow/deskflow/releases/assets/123')
+    assert.ok(args.includes('Accept: application/octet-stream'))
+    writeFileSync(execOptions.stdio[1], payload)
+  })
+  assert.equal(apiRequests.length, 2)
+  assert.equal(readFileSync(join(options.cache, options.name), 'utf8'), payload)
+})
+
+test('rejects corrupt content received through the API', (t) => {
+  const options = fixture(t)
+  assert.throws(
+    () =>
+      downloadVerified(options, (tool, args, execOptions) => {
+        if (tool === 'curl') throw new Error('HTTP 504')
+        if (args[1].includes('/tags/'))
+          return JSON.stringify({ assets: [{ id: 123, name: 'engine.zip' }] })
+        writeFileSync(execOptions.stdio[1], 'invalid API response')
+      }),
+    /Checksum mismatch/,
+  )
+  assert.equal(existsSync(join(options.cache, options.name)), false)
+  assert.equal(existsSync(join(options.cache, options.name + '.download')), false)
+})
+
+test('requires the API metadata to contain the exact requested asset', (t) => {
+  const options = fixture(t)
+  assert.throws(
+    () =>
+      downloadVerified(options, (tool) => {
+        if (tool === 'curl') throw new Error('HTTP 504')
+        return JSON.stringify({ assets: [{ id: 123, name: 'other.zip' }] })
+      }),
+    /Official release contains no asset/,
+  )
   assert.equal(existsSync(join(options.cache, options.name + '.download')), false)
 })
 
