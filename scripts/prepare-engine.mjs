@@ -1,8 +1,8 @@
 import { prepareLinux } from './prepare-engine-linux.mjs'
+import { downloadVerified } from './download-verified.mjs'
 import { execFileSync } from 'node:child_process'
 import {
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -49,33 +49,7 @@ const assets = {
 }
 const digest = (file) => createHash('sha256').update(readFileSync(file)).digest('hex')
 function download(name, url, expected) {
-  const target = join(cache, name)
-  if (existsSync(target) && digest(target) === expected) return target
-  const pending = target + '.download'
-  execFileSync(
-    'curl',
-    [
-      '--http1.1',
-      '-fL',
-      '--retry',
-      '2',
-      '--connect-timeout',
-      '20',
-      '--max-time',
-      '300',
-      url,
-      '-o',
-      pending,
-    ],
-    { stdio: 'inherit' },
-  )
-  if (digest(pending) !== expected) {
-    rmSync(pending)
-    throw new Error(`Checksum mismatch: ${name}`)
-  }
-  cpSync(pending, target)
-  rmSync(pending)
-  return target
+  return downloadVerified({ cache, name, url, sha256: expected })
 }
 const source = download(
   `deskflow-${version}-source.tar.gz`,

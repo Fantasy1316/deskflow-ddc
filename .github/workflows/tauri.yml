@@ -35,6 +35,9 @@ jobs:
             bundle: nsis
             name: windows-x64
     runs-on: ${{ matrix.os }}
+    env:
+      # Keep Tauri's official source and hash checks, but request fresh release redirects.
+      TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE: https://github.com/<owner>/<repo>/releases/download/<version>/<asset>?deskflow-ddc-ci=${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -49,6 +52,11 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .engine-cache
+          key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/download-verified.mjs') }}
+      - run: node --test scripts/download-verified.test.mjs
       - run: pnpm prepare:engine
       - run: pnpm typecheck
       - run: pnpm build:web
