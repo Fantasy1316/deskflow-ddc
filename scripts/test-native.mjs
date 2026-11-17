@@ -22,7 +22,63 @@ execFileSync(
   { stdio: 'inherit' },
 )
 execFileSync('.native-cache/test-ddc', [], { stdio: 'inherit' })
+execFileSync(
+  'clang',
+  [
+    '-std=c11',
+    '-Wall',
+    '-Wextra',
+    '-Werror',
+    '-Iresources/vendor/m1ddc/headers',
+    'native/tests/intel-ddc.c',
+    '-o',
+    '.native-cache/test-intel-ddc',
+  ],
+  { stdio: 'inherit' },
+)
+execFileSync('.native-cache/test-intel-ddc', [], { stdio: 'inherit' })
 if (process.platform === 'darwin') {
+  execFileSync(
+    'clang',
+    [
+      '-fobjc-arc',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-Iresources/vendor/m1ddc/headers',
+      '-framework',
+      'AppKit',
+      '-framework',
+      'IOKit',
+      'native/tests/intel-ddc-transport.m',
+      '-o',
+      '.native-cache/test-intel-ddc-transport',
+    ],
+    { stdio: 'inherit' },
+  )
+  execFileSync('.native-cache/test-intel-ddc-transport', [], { stdio: 'inherit' })
+  // Compile both architectures even on ARM runners; never send real DDC here.
+  for (const cpu of ['arm64', 'x86_64'])
+    execFileSync(
+      'clang',
+      [
+        '-target',
+        `${cpu}-apple-macosx14.0`,
+        '-fobjc-arc',
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        '-Iresources/vendor/m1ddc/headers',
+        '-framework',
+        'AppKit',
+        '-framework',
+        'IOKit',
+        'native/mac-intel-ddc.m',
+        '-o',
+        `.native-cache/test-intel-ddc-${cpu}`,
+      ],
+      { stdio: 'inherit' },
+    )
   execFileSync(
     'swiftc',
     [
@@ -69,4 +125,22 @@ if (process.platform === 'darwin') {
     { stdio: 'inherit' },
   )
   execFileSync('.native-cache/test-mac-lifecycle', [], { stdio: 'inherit' })
+  execFileSync(
+    'clang',
+    [
+      '-fobjc-arc',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-framework',
+      'AppKit',
+      '-framework',
+      'QuartzCore',
+      'native/tests/mac-tray-file-drop.m',
+      '-o',
+      '.native-cache/test-mac-tray-file-drop',
+    ],
+    { stdio: 'inherit' },
+  )
+  execFileSync('.native-cache/test-mac-tray-file-drop', [], { stdio: 'inherit' })
 }

@@ -710,21 +710,26 @@ impl Runtime {
                 };
                 self.trace(
                     "display.remoteWriteRequested",
-                    json!({"target":target,"monitor":s.config.display_id,"value":value}),
+                    json!({"target":target,"monitor":s.config.display_id,"value":value,"inputProtocol":s.config.input_protocol()}),
                 )
                 .await;
-                let result = self.platform.input(&s.config.display_id, value).await;
+                let result = self
+                    .platform
+                    .input_with_protocol(&s.config.display_id, value, s.config.input_protocol())
+                    .await;
                 self.trace(
                     "display.remoteWriteCompleted",
-                    json!({"target":target,"monitor":s.config.display_id,"value":value,
+                    json!({"target":target,"monitor":s.config.display_id,"value":value,"inputProtocol":s.config.input_protocol(),
                         "commandAccepted":result.is_ok(),"pictureVerified":false,
                         "error":result.as_ref().err().map(|e|e.to_string())}),
                 )
                 .await;
                 result?;
                 ensure!(self.current(link), "共享会话已结束");
-                Ok(json!({"monitor":s.config.display_id,"value":value,
-                    "commandAccepted":true,"pictureVerified":false}))
+                Ok(
+                    json!({"monitor":s.config.display_id,"value":value,"inputProtocol":s.config.input_protocol(),
+                    "commandAccepted":true,"pictureVerified":false}),
+                )
             }
             "land-pointer" => {
                 let _effects = self.effects.lock().await;

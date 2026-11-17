@@ -20,8 +20,11 @@ window.addEventListener('unhandledrejection', (event) =>
   reportError(event.reason, 'window.unhandledrejection'),
 )
 async function bootstrap() {
-  await installTauriBridge()
-  const app = createApp(App)
+  const panel = new URLSearchParams(window.location.search).get('panel')
+  if (panel !== 'file-send') await installTauriBridge()
+  const component =
+    panel === 'file-send' ? (await import('./components/FileSendPanel.vue')).default : App
+  const app = createApp(component)
   app.config.errorHandler = (error) => reportError(error, 'vue')
   app.mount('#app')
 }

@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "deskflow-ddc-tauri"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -992,6 +992,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "windows",
+ "windows-core",
  "windows-registry",
  "windows-sys 0.61.2",
 ]

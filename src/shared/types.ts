@@ -2,6 +2,23 @@ export type Role = 'host' | 'client'
 export type ScreenSide = 'left' | 'right' | 'top' | 'bottom'
 export type ModifierMapping = 'original' | 'common'
 export type OperationMode = 'sharing' | 'display-only'
+export type InputProtocol = 'standard' | 'input-alt'
+export type ProtocolChoice = 'auto' | InputProtocol
+export interface DdcProfile {
+  identity: string
+  name: string
+  platform: string
+  protocol: InputProtocol
+  localInput: number
+  peerInput: number
+}
+export interface DdcDetection {
+  displayId: string
+  identity: string | null
+  readings: { protocol: InputProtocol; currentInput: number | null; error: string | null }[]
+  recommended: InputProtocol | null
+  savedProfile: DdcProfile | null
+}
 export interface StartupPreferences {
   launchAtLogin: boolean
   autoShare: boolean
@@ -18,6 +35,8 @@ export interface Config {
   deskflowPort: number
   deskflowPath: string
   displayId: string
+  ddcProtocol: ProtocolChoice
+  ddcAutoProtocol: InputProtocol
   localInput: number | null
   peerInput: number | null
   shortcut: string
@@ -41,6 +60,7 @@ export interface SessionLayout {
 }
 export interface Monitor {
   id: string
+  identity?: string | null
   name: string
   currentInput?: number
   readable: boolean
@@ -100,6 +120,8 @@ export interface Snapshot {
   platform: string
   addresses: string[]
   monitors: Monitor[]
+  ddcProfiles?: DdcProfile[]
+  ddcDetection?: DdcDetection | null
   running: boolean
   listening: boolean
   connected: boolean

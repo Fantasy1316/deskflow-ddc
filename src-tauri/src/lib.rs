@@ -1,3 +1,4 @@
+pub mod ddc;
 pub mod diagnostics;
 pub mod discovery;
 pub mod engine;

@@ -139,9 +139,16 @@ impl Platform {
         #[cfg(not(windows))]
         bail!("仅支持锁定 Windows 接收端")
     }
+    pub(crate) fn mac_ddc_helper(&self) -> PathBuf {
+        self.resources.join(if cfg!(target_arch = "x86_64") {
+            "native/bin/intel-ddc"
+        } else {
+            "native/bin/m1ddc"
+        })
+    }
     pub async fn available(&self) -> bool {
         match platform() {
-            "darwin" => self.resources.join("native/bin/m1ddc").is_file(),
+            "darwin" => self.mac_ddc_helper().is_file(),
             "win32" => self.resources.join("native/monitor.ps1").is_file(),
             "linux" => crate::linux::ddcutil().is_some(),
             _ => false,
@@ -172,6 +179,16 @@ impl Platform {
                 .is_ok_and(|s| s == "true")
     }
     pub async fn list(&self) -> Result<Value> {
+        self.list_using(None).await
+    }
+    pub async fn list_for(&self, config: &crate::model::Config) -> Result<Value> {
+        self.list_using(Some((&config.display_id, config.input_protocol())))
+            .await
+    }
+    async fn list_using(
+        &self,
+        selected: Option<(&str, crate::ddc::InputProtocol)>,
+    ) -> Result<Value> {
         if platform() == "linux" {
             return self.linux_list().await;
         }
@@ -187,20 +204,26 @@ impl Platform {
         }
         ensure!(platform() == "darwin", "当前系统不支持 DDC");
         let text = self
-            .run(
-                self.resources.join("native/bin/m1ddc"),
-                &["display".into(), "list".into()],
-            )
+            .run(self.mac_ddc_helper(), &["display".into(), "list".into()])
             .await?;
         let mut monitors = parse_mac_displays(&text);
         for monitor in &mut monitors {
             let id = monitor["id"].as_str().unwrap().to_owned();
+            let protocol = selected
+                .filter(|(selected, _)| selected.eq_ignore_ascii_case(&id))
+                .map(|(_, protocol)| protocol)
+                .unwrap_or_default();
             // An unreadable VCP must not hide an otherwise selectable display.
             if let Ok(Ok(value)) = tokio::time::timeout(
                 Duration::from_millis(2500),
                 self.run(
-                    self.resources.join("native/bin/m1ddc"),
-                    &["display".into(), id, "get".into(), "input".into()],
+                    self.mac_ddc_helper(),
+                    &[
+                        "display".into(),
+                        id,
+                        "get".into(),
+                        protocol.command().into(),
+                    ],
                 ),
             )
             .await
@@ -227,10 +250,7 @@ impl Platform {
             self.win("list", serde_json::json!({})).await?
         } else {
             let output = self
-                .run(
-                    self.resources.join("native/bin/m1ddc"),
-                    &["display".into(), "list".into()],
-                )
+                .run(self.mac_ddc_helper(), &["display".into(), "list".into()])
                 .await?;
             Value::Array(parse_mac_displays(&output))
         };
@@ -246,6 +266,19 @@ impl Platform {
         })
     }
     pub async fn input(&self, id: &str, value: u16) -> Result<()> {
+        self.input_with_protocol(id, value, crate::ddc::InputProtocol::Standard)
+            .await
+    }
+    pub async fn input_with_protocol(
+        &self,
+        id: &str,
+        value: u16,
+        protocol: crate::ddc::InputProtocol,
+    ) -> Result<()> {
+        ensure!(
+            protocol.supported(platform()),
+            "当前系统暂不支持 input-alt，请选择标准输入控制；Mac 的兼容数值不能直接用于此系统"
+        );
         if platform() == "linux" {
             return self.linux_input(id, value).await;
         }
@@ -258,12 +291,12 @@ impl Platform {
                 .await?;
         } else {
             self.run(
-                self.resources.join("native/bin/m1ddc"),
+                self.mac_ddc_helper(),
                 &[
                     "display".into(),
                     id.into(),
                     "set".into(),
-                    "input".into(),
+                    protocol.command().into(),
                     value.to_string(),
                 ],
             )
@@ -272,6 +305,18 @@ impl Platform {
         Ok(())
     }
     pub async fn current_input(&self, id: &str) -> Result<Option<u16>> {
+        self.current_input_with_protocol(id, crate::ddc::InputProtocol::Standard)
+            .await
+    }
+    pub async fn current_input_with_protocol(
+        &self,
+        id: &str,
+        protocol: crate::ddc::InputProtocol,
+    ) -> Result<Option<u16>> {
+        ensure!(
+            protocol.supported(platform()),
+            "当前系统暂不支持读取 input-alt"
+        );
         if platform() == "linux" {
             return self.linux_current_input(id).await;
         }
@@ -287,8 +332,13 @@ impl Platform {
         let output = tokio::time::timeout(
             Duration::from_millis(2500),
             self.run(
-                self.resources.join("native/bin/m1ddc"),
-                &["display".into(), id.into(), "get".into(), "input".into()],
+                self.mac_ddc_helper(),
+                &[
+                    "display".into(),
+                    id.into(),
+                    "get".into(),
+                    protocol.command().into(),
+                ],
             ),
         )
         .await
@@ -356,7 +406,7 @@ fn parse_mac_displays(output: &str) -> Vec<Value> {
         .expect("static display regex");
     regex
         .captures_iter(output)
-        .map(|m| serde_json::json!({"id":&m[3],"name":m[2].trim(),"readable":false}))
+        .map(|m| serde_json::json!({"id":&m[3],"identity":m[3].to_ascii_lowercase(),"name":m[2].trim(),"readable":false}))
         .collect()
 }
 
@@ -371,6 +421,49 @@ fn parse_input(output: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn selected_protocol_controls_reads_writes_and_scans_without_inferring_from_values() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("native/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let helper = Platform::new(directory.path().into()).mac_ddc_helper();
+        let id = "12345678-1234-1234-1234-123456789ABC";
+        std::fs::write(
+            &helper,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> "$0.calls"
+if [ "$1 $2" = 'display list' ]; then echo '[1] LG ({id})'; exit 0; fi
+if [ "$3 $4" = 'get input-alt' ]; then echo 208; exit 0; fi
+if [ "$3 $4" = 'get input' ]; then echo 15; exit 0; fi
+[ "$3" = set ]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let platform = Platform::new(directory.path().into());
+        platform.input(id, 208).await.unwrap();
+        platform
+            .input_with_protocol(id, 144, crate::ddc::InputProtocol::InputAlt)
+            .await
+            .unwrap();
+        assert_eq!(platform.current_input(id).await.unwrap(), Some(15));
+        let config = crate::model::Config {
+            display_id: id.into(),
+            ddc_protocol: crate::ddc::ProtocolChoice::InputAlt,
+            ..Default::default()
+        };
+        let scanned = platform.list_for(&config).await.unwrap();
+        assert_eq!(scanned[0]["currentInput"], 208);
+        assert_eq!(scanned[0]["identity"], id.to_ascii_lowercase());
+        let calls = std::fs::read_to_string(helper.with_extension("calls")).unwrap();
+        assert!(calls.contains(&format!("display {id} set input 208")));
+        assert!(calls.contains(&format!("display {id} set input-alt 144")));
+        assert!(calls.ends_with(&format!("display {id} get input-alt\n")));
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn native_failure_keeps_ddc_error_written_to_stdout() {

@@ -96,7 +96,10 @@ impl Runtime {
             None => {
                 let read = self
                     .platform
-                    .current_input(&state.config.display_id)
+                    .current_input_with_protocol(
+                        &state.config.display_id,
+                        state.config.input_protocol(),
+                    )
                     .await
                     .ok()
                     .flatten();
@@ -155,7 +158,11 @@ impl Runtime {
         // cursor movement, even if an old pairing/engine configuration exists.
         let result = self
             .platform
-            .input(&state.config.display_id, value)
+            .input_with_protocol(
+                &state.config.display_id,
+                value,
+                state.config.input_protocol(),
+            )
             .await
             .context("发送输入源指令失败");
         let confirmed = self
@@ -279,7 +286,7 @@ pub(super) mod tests {
             i.state.dependencies.accessibility = false;
             i.state.dependencies.deskflow = false;
         }
-        let helper = runtime.platform.resources.join("native/bin/m1ddc");
+        let helper = runtime.platform.mac_ddc_helper();
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
         // Isolated mock executable: records DDC requests to this temporary
         // directory only. Never opens IOKit, USB or a real display.
@@ -376,8 +383,7 @@ fi
     #[tokio::test]
     async fn standalone_hotkey_reverses_unconfirmed_commands_despite_repeated_old_vcp() {
         let (_directory, runtime) = standalone_fixture().await;
-        let bin = runtime.platform.resources.join("native/bin");
-        let helper = bin.join("m1ddc");
+        let helper = runtime.platform.mac_ddc_helper();
         // Writes are accepted but every get keeps returning the old local input.
         std::fs::write(
             &helper,
@@ -388,7 +394,7 @@ fi
         for _ in 0..4 {
             runtime.toggle().await.unwrap();
         }
-        let writes = std::fs::read_to_string(bin.join("m1ddc.writes")).unwrap();
+        let writes = std::fs::read_to_string(helper.with_extension("writes")).unwrap();
         assert_eq!(
             writes.lines().collect::<Vec<_>>(),
             vec!["17", "15", "17", "15"]

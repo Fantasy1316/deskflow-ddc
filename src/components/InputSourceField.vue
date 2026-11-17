@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import { computed, shallowRef, watch } from 'vue'
-const props = defineProps<{ modelValue: number | null; disabled: boolean; name: string }>()
+import { inputPresets } from '../shared/ddc'
+import type { InputProtocol } from '../shared/types'
+const props = defineProps<{
+  modelValue: number | null
+  disabled: boolean
+  name: string
+  protocol?: InputProtocol
+}>()
 const emit = defineEmits<{ 'update:modelValue': [value: number | null] }>()
-const presets = [
-  { value: 17, name: 'HDMI 1' },
-  { value: 18, name: 'HDMI 2' },
-  { value: 15, name: 'DisplayPort 1' },
-  { value: 16, name: 'DisplayPort 2' },
-  { value: 3, name: 'DVI 1' },
-  { value: 4, name: 'DVI 2' },
-  { value: 1, name: 'VGA' },
-]
+const presets = computed(() => inputPresets(props.protocol ?? 'standard'))
 const custom = shallowRef(false)
 watch(
   () => props.modelValue,
@@ -19,7 +18,8 @@ watch(
   },
 )
 const choice = computed(() =>
-  custom.value || (props.modelValue !== null && !presets.some((p) => p.value === props.modelValue))
+  custom.value ||
+  (props.modelValue !== null && !presets.value.some((p) => p.value === props.modelValue))
     ? 'custom'
     : props.modelValue === null
       ? ''
@@ -46,7 +46,7 @@ function update(event: Event) {
       <option value="custom">自定义数值</option>
     </select></label
   >
-  <label class="field"
+  <label v-if="choice === 'custom'" class="field"
     ><span>{{ name }}的输入源数值</span
     ><input
       :value="modelValue ?? ''"

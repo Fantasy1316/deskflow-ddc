@@ -72,11 +72,11 @@ mod tests {
     async fn automatic_display_only_enables_once_without_input_engine_network_or_ddc_write() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), "host");
-        let helper = runtime.platform.resources.join(if cfg!(windows) {
-            "native/monitor.ps1"
+        let helper = if cfg!(windows) {
+            runtime.platform.resources.join("native/monitor.ps1")
         } else {
-            "native/bin/m1ddc"
-        });
+            runtime.platform.mac_ddc_helper()
+        };
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
         std::fs::write(
             helper,

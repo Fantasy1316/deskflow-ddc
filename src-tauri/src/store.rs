@@ -18,6 +18,8 @@ pub struct Stored {
     pub id: Uuid,
     pub config: Config,
     #[serde(default)]
+    pub ddc_profiles: Vec<crate::ddc::Profile>,
+    #[serde(default)]
     pub startup: crate::startup::Preferences,
     pub trusted_peer: Option<Pin>,
     #[serde(default)]
@@ -32,6 +34,16 @@ fn decode_settings(bytes: &[u8]) -> Result<Stored> {
     let mut value: Stored = serde_json::from_slice(bytes).context("配置损坏；未覆盖原文件")?;
     ensure!([2, 3].contains(&value.version), "配置版本不支持");
     value.config.validate()?;
+    ensure!(
+        value.ddc_profiles.len() <= 24
+            && value.ddc_profiles.iter().all(|p| !p.identity.is_empty()
+                && p.identity.len() <= 512
+                && !p.identity.contains(['\n', '\r', '\0'])
+                && p.name.len() <= 512
+                && ["darwin", "win32", "linux"].contains(&p.platform.as_str())
+                && p.local_input != p.peer_input),
+        "显示器历史配置无效；未覆盖原文件"
+    );
     if value.version == 2 {
         // Apply the safer default once; preserve identity, pairing and layout.
         value.config.cross_screen_video = "manual".into();
@@ -70,6 +82,7 @@ impl Store {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stored {
                 version: 3,
+                ddc_profiles: vec![],
                 startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config::default(),
@@ -200,6 +213,7 @@ mod tests {
     fn unpaired() -> Stored {
         Stored {
             version: 3,
+            ddc_profiles: vec![],
             startup: crate::startup::Preferences::default(),
             id: Uuid::new_v4(),
             config: Config::default(),
@@ -211,8 +225,19 @@ mod tests {
     fn legacy_settings_keep_startup_opted_out() {
         let mut old = serde_json::to_value(unpaired()).unwrap();
         old.as_object_mut().unwrap().remove("startup");
+        old.as_object_mut().unwrap().remove("ddcProfiles");
+        old["config"].as_object_mut().unwrap().remove("ddcProtocol");
+        old["config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ddcAutoProtocol");
         let restored = decode_settings(&serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!(restored.startup, crate::startup::Preferences::default());
+        assert_eq!(
+            restored.config.input_protocol(),
+            crate::ddc::InputProtocol::Standard
+        );
+        assert!(restored.ddc_profiles.is_empty());
     }
     #[test]
     fn completes_old_interrupted_initialization_without_changing_settings() {
@@ -293,6 +318,7 @@ mod tests {
             directory: dir.path().join("new"),
             value: Stored {
                 version: 3,
+                ddc_profiles: vec![],
                 startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config::default(),
@@ -312,6 +338,7 @@ mod tests {
         for mode in ["follow", "keep"] {
             let original = Stored {
                 version: 2,
+                ddc_profiles: vec![],
                 startup: crate::startup::Preferences::default(),
                 id: Uuid::new_v4(),
                 config: Config {

@@ -5,7 +5,9 @@ use std::{path::PathBuf, time::Duration};
 #[tokio::test]
 #[ignore = "requires pnpm prepare:engine; run with --test bundled_runtime -- --ignored"]
 async fn official_runtime_extracts_and_runs_without_an_installed_deskflow() {
-    let resources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let resources = std::env::var_os("DESKFLOW_DDC_TEST_RESOURCES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
     let test_cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/bundle-smoke");
     std::fs::create_dir_all(&test_cache).unwrap();
     let profile = tempfile::Builder::new()

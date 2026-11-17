@@ -3,7 +3,10 @@ use super::*;
 impl Runtime {
     pub(super) async fn read_display_source(&self, peer_id: &str) -> Result<Option<String>> {
         let s = self.snapshot().await;
-        let value = self.platform.current_input(&s.config.display_id).await?;
+        let value = self
+            .platform
+            .current_input_with_protocol(&s.config.display_id, s.config.input_protocol())
+            .await?;
         Ok(value.and_then(|value| {
             if Some(value) == s.config.local_input {
                 Some(s.device_id)
@@ -78,12 +81,16 @@ impl Runtime {
             };
             self.trace(
                 "display.localWriteRequested",
-                json!({"target":target,"monitor":s.config.display_id,"value":value}),
+                json!({"target":target,"monitor":s.config.display_id,"value":value,"inputProtocol":s.config.input_protocol()}),
             )
             .await;
-            self.platform.input(&s.config.display_id, value).await?;
-            Ok(json!({"monitor":s.config.display_id,"value":value,
-                "commandAccepted":true,"pictureVerified":false}))
+            self.platform
+                .input_with_protocol(&s.config.display_id, value, s.config.input_protocol())
+                .await?;
+            Ok(
+                json!({"monitor":s.config.display_id,"value":value,"inputProtocol":s.config.input_protocol(),
+                "commandAccepted":true,"pictureVerified":false}),
+            )
         } else {
             // Older peers return true; newer peers also include their configured
             // monitor/input value for diagnosis. Neither is picture verification.
@@ -734,7 +741,11 @@ impl Runtime {
             target
         };
         self.publish();
-        let result = self.platform.input(&s.config.display_id, value).await;
+        self.record_ddc_test(&s.config, value, false).await;
+        let result = self
+            .platform
+            .input_with_protocol(&s.config.display_id, value, s.config.input_protocol())
+            .await;
         ensure!(
             self.epoch.load(Ordering::Acquire) == epoch,
             "切换已取消，正在恢复输出"
@@ -758,6 +769,12 @@ impl Runtime {
         }
         self.settle_display(&protection, None, label, result.is_ok())
             .await;
+        self.record_ddc_test(
+            &s.config,
+            value,
+            result.is_ok() && self.epoch.load(Ordering::Acquire) == epoch,
+        )
+        .await;
         {
             let mut i = self.inner.lock().await;
             i.state.switching = false;
@@ -834,7 +851,7 @@ mod tests {
                         let native = runtime.platform.resources.join("native/bin");
                         std::fs::create_dir_all(&native).unwrap();
                         let input = native.join("mac-hotkey");
-                        let ddc = native.join("m1ddc");
+                        let ddc = runtime.platform.mac_ddc_helper();
                         for (path, script) in [
                             (&input, "#!/bin/sh\ncase \"$1\" in\nhost|pointer) echo \"$*\" >> \"$0.calls\"; echo sent ;;\n*) exit 9 ;;\nesac\n"),
                             (&ddc, "#!/bin/sh\ntest \"$1\" = display && test \"$2\" = external && test \"$3\" = set && test \"$4\" = input || exit 9\ncase \"$5\" in 1|3) ;; *) exit 9 ;; esac\necho \"$*\" >> \"$0.calls\"\n"),
@@ -983,7 +1000,7 @@ mod tests {
             let native = runtime.platform.resources.join("native/bin");
             std::fs::create_dir_all(&native).unwrap();
             let hotkey = native.join("mac-hotkey");
-            let ddc = native.join("m1ddc");
+            let ddc = runtime.platform.mac_ddc_helper();
             for (path, script) in [
                 (&hotkey, "#!/bin/sh\ncase \"$1\" in\ndiagnose) echo '{\"accessibility\":true,\"postEventAccess\":true,\"secureEventInput\":false}' ;;\npeer) echo sent >> \"$0.calls\"; echo sent ;;\n*) exit 9 ;;\nesac\n"),
                 (&ddc, "#!/bin/sh\necho ddc >> \"$0.calls\"\n"),

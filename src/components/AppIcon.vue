@@ -27,6 +27,12 @@ import {
   ExternalLink,
   Download,
   Upload,
+  Info,
+  Github,
+  BookOpen,
+  MessageSquare,
+  Heart,
+  Code2,
 } from 'lucide-vue-next'
 const icons = {
   monitor: Monitor,
@@ -56,6 +62,12 @@ const icons = {
   external: ExternalLink,
   download: Download,
   upload: Upload,
+  info: Info,
+  github: Github,
+  book: BookOpen,
+  message: MessageSquare,
+  heart: Heart,
+  code: Code2,
 }
 defineProps<{ name: keyof typeof icons; size?: number }>()
 </script>

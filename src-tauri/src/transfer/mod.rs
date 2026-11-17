@@ -31,6 +31,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[derive(Clone, Debug)]
+pub enum PreparationProgress {
+    Scanning(usize),
+    Ready(Uuid),
+}
+pub type PreparationObserver = Arc<dyn Fn(PreparationProgress) + Send + Sync>;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Offer {
@@ -288,6 +295,15 @@ impl Manager {
         peer: Uuid,
         name: String,
     ) -> Result<Uuid> {
+        self.prepare_observed(paths, peer, name, None).await
+    }
+    pub async fn prepare_observed(
+        self: &Arc<Self>,
+        paths: Vec<PathBuf>,
+        peer: Uuid,
+        name: String,
+        observer: Option<PreparationObserver>,
+    ) -> Result<Uuid> {
         ensure!(!self.closing.load(Ordering::Acquire), "应用正在退出");
         ensure!(
             !self.suspended.load(Ordering::Acquire),
@@ -298,8 +314,26 @@ impl Manager {
             "正在扫描文件，请稍候"
         );
         let c = self.scan_cancel.child_token();
+        let progress = observer.clone();
         let result = scheduling::executor()?
-            .spawn_blocking(move || manifest::scan(paths, &c))
+            .spawn_blocking(move || {
+                if let Some(progress) = progress {
+                    let mut last = std::time::Instant::now();
+                    let mut entries = 0;
+                    progress(PreparationProgress::Scanning(0));
+                    let result = manifest::scan_with_progress(paths, &c, &mut |count| {
+                        entries = count;
+                        if last.elapsed() >= Duration::from_millis(100) {
+                            progress(PreparationProgress::Scanning(count));
+                            last = std::time::Instant::now();
+                        }
+                    });
+                    progress(PreparationProgress::Scanning(entries));
+                    result
+                } else {
+                    manifest::scan(paths, &c)
+                }
+            })
             .await;
         self.preparing.store(false, Ordering::Release);
         let manifest = result??;
@@ -350,6 +384,10 @@ impl Manager {
             "仅切换显示器模式不支持文件传输"
         );
         self.add(record)?;
+        drop(_lifecycle);
+        if let Some(observer) = observer {
+            observer(PreparationProgress::Ready(id));
+        }
         Ok(id)
     }
     pub fn incoming(

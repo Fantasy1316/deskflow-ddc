@@ -167,7 +167,8 @@ impl crate::platform::Platform {
     pub(crate) async fn linux_list(&self) -> Result<Value> {
         let mut monitors = Vec::new();
         for display in displays()? {
-            let mut monitor = json!({"id":display.id,"name":display.name,"readable":false});
+            let mut monitor =
+                json!({"id":display.id,"identity":display.id,"name":display.name,"readable":false});
             if let Ok(Some(value)) = self.linux_current_input(&display.id).await {
                 monitor["readable"] = true.into();
                 monitor["currentInput"] = value.into();

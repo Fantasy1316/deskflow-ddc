@@ -13,7 +13,7 @@ struct Pending {
 #[derive(Default)]
 pub(super) struct FileDrops(Mutex<Option<Pending>>);
 impl FileDrops {
-    fn register(&self, paths: Vec<PathBuf>) -> Result<Uuid> {
+    pub(super) fn register(&self, paths: Vec<PathBuf>) -> Result<Uuid> {
         let mut pending = self.0.lock().unwrap();
         *pending = None;
         ensure!(
@@ -58,8 +58,16 @@ pub(super) fn handle(app: &tauri::AppHandle, event: &tauri::DragDropEvent) {
     let Some(drops) = app.try_state::<FileDrops>() else {
         return;
     };
+    handle_for(app, event, "main", &drops);
+}
+pub(super) fn handle_for(
+    app: &tauri::AppHandle,
+    event: &tauri::DragDropEvent,
+    label: &str,
+    drops: &FileDrops,
+) {
     let scale = app
-        .get_webview_window("main")
+        .get_webview_window(label)
         .and_then(|w| w.scale_factor().ok())
         .unwrap_or(1.0);
     let position =
@@ -79,11 +87,11 @@ pub(super) fn handle(app: &tauri::AppHandle, event: &tauri::DragDropEvent) {
         },
         _ => return,
     };
-    let result = app.emit_to("main", "file-drag", &payload);
+    let result = app.emit_to(label, "file-drag", &payload);
     if let tauri::DragDropEvent::Drop { paths, .. } = event {
         if let Some(runtime) = app.try_state::<Arc<Runtime>>() {
             let runtime = runtime.inner().clone();
-            let details = json!({"count":paths.len(),"position":payload["position"],
+            let details = json!({"window":label,"count":paths.len(),"position":payload["position"],
                 "registered":payload.get("token").is_some(),"validationError":payload["error"],
                 "emitError":result.err().map(|e|e.to_string())});
             tauri::async_runtime::spawn(async move {

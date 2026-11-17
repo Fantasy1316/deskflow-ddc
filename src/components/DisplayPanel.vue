@@ -6,12 +6,16 @@ import InputSourceField from './InputSourceField.vue'
 import DisplayTestStep from './DisplayTestStep.vue'
 import SettingsLock from './SettingsLock.vue'
 import DisplayMethodSettings from './DisplayMethodSettings.vue'
+import DdcProtocolSettings from './display/DdcProtocolSettings.vue'
+import { useDdcSetup } from '../composables/useDdcSetup'
 import { useConfigDraft } from '../composables/useConfigDraft'
 import { displayMappingValid, type ActionRunner } from '../shared/workspace'
 import type { Action, Snapshot } from '../shared/types'
 const props = defineProps<{ state: Snapshot; busy: boolean; execute: ActionRunner }>()
 const emit = defineEmits<{ action: [action: Action] }>()
 const { draft, value } = useConfigDraft(() => props.state.config)
+const { protocol, saved, restoreSaved, applyRecommendation, protocolChanged, selectDisplay } =
+  useDdcSetup(() => props.state, draft)
 const displayOnly = computed(() => props.state.config.mode === 'display-only')
 const dirty = computed(() => JSON.stringify(value()) !== JSON.stringify(props.state.config))
 const locked = computed(() => props.busy || props.state.running)
@@ -98,7 +102,7 @@ const testReason = computed(() =>
           </div>
           <label class="field"
             ><span>本机连接的共享显示器</span
-            ><select v-model="draft.displayId" :disabled="locked">
+            ><select v-model="draft.displayId" :disabled="locked" @change="selectDisplay">
               <option value="" disabled>请选择显示器</option>
               <option v-if="draft.displayId && !selected" :value="draft.displayId">
                 已保存的显示器（当前未扫描到）
@@ -138,6 +142,27 @@ const testReason = computed(() =>
             <code class="copyable-text">{{ draft.displayId }}</code>
             <p>此标识用于选择设备，不是输入源数值。</p>
           </details>
+          <DdcProtocolSettings
+            v-model:choice="draft.ddcProtocol"
+            v-model:auto-protocol="draft.ddcAutoProtocol"
+            :platform="state.platform"
+            :display-id="draft.displayId"
+            :detection="state.ddcDetection"
+            :locked="locked"
+            @detect="execute({ type: 'detectDdc', displayId: draft.displayId })"
+            @apply="applyRecommendation"
+            @protocol-changed="protocolChanged"
+          />
+          <p v-if="saved" class="hint">
+            本机已记住此显示器的双向确认配置。<button
+              type="button"
+              class="text-button"
+              :disabled="locked"
+              @click="restoreSaved"
+            >
+              恢复已验证配置
+            </button>
+          </p>
         </div>
         <div class="panel">
           <div class="panel-heading">
@@ -151,13 +176,23 @@ const testReason = computed(() =>
             <div class="mapping-card">
               <span class="mapping-label"
                 ><AppIcon name="laptop" :size="18" />{{ state.config.deviceName }} · 本机</span
-              ><InputSourceField v-model="draft.localInput" :disabled="locked" name="本机" />
+              ><InputSourceField
+                v-model="draft.localInput"
+                :protocol="protocol"
+                :disabled="locked"
+                name="本机"
+              />
             </div>
             <span class="mapping-arrow"><AppIcon name="switch" /></span>
             <div class="mapping-card">
               <span class="mapping-label"
                 ><AppIcon name="laptop" :size="18" />{{ peerName }} · 对端</span
-              ><InputSourceField v-model="draft.peerInput" :disabled="locked" name="另一台电脑" />
+              ><InputSourceField
+                v-model="draft.peerInput"
+                :protocol="protocol"
+                :disabled="locked"
+                name="另一台电脑"
+              />
             </div>
           </div>
           <p class="hint">
@@ -171,12 +206,12 @@ const testReason = computed(() =>
             两台电脑需要不同的输入源数值，请检查接口映射。
           </p>
           <div class="mapping-example">
-            <strong>{{ displayOnly ? '两个输入源的对应关系' : '另一端需要反向填写' }}</strong>
+            <strong>{{
+              displayOnly ? '两个输入源的对应关系' : '两端分别配置，以各自实测为准'
+            }}</strong>
             <p v-if="!displayOnly">
-              {{ state.config.deviceName }}：本机 {{ draft.localInput ?? 'A' }} / 对端
-              {{ draft.peerInput ?? 'B' }} → {{ peerName }}：本机 {{ draft.peerInput ?? 'B' }} /
-              对端
-              {{ draft.localInput ?? 'A' }}
+              本机：本机输入 {{ draft.localInput ?? 'A' }} / 对端输入 {{ draft.peerInput ?? 'B' }}。
+              两端使用相同协议时通常反向填写；使用不同协议时，接口数值可能不同，请在各端单独检测与测试。
             </p>
             <p v-if="displayOnly">
               本机输入 {{ draft.localInput ?? '待设置' }} / 另一输入

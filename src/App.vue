@@ -13,6 +13,7 @@ import SharingPanel from './components/SharingPanel.vue'
 import DisplayOnlySettings from './components/DisplayOnlySettings.vue'
 import ActivityPanel from './components/ActivityPanel.vue'
 import FileTransferPanel from './components/FileTransferPanel.vue'
+import AboutPanel from './components/AboutPanel.vue'
 import { useTransfers } from './composables/useTransfers'
 import { useBridge } from './composables/useBridge'
 import { version } from '../package.json'
@@ -47,6 +48,7 @@ const allNav = [
   { id: 'sharing', label: '共享设置', icon: 'settings' },
   { id: 'files', label: '文件传输', icon: 'folder' },
   { id: 'activity', label: '活动记录', icon: 'clock' },
+  { id: 'about', label: '关于我们', icon: 'info' },
 ] as const
 const displayOnly = computed(() => state.value.config.mode === 'display-only')
 const nav = computed(() =>
@@ -94,6 +96,8 @@ const on = computed(() =>
         <button
           v-for="item in nav"
           :key="item.id"
+          :title="item.label"
+          :aria-label="item.label"
           :class="['nav-item', { selected: page === item.id }]"
           :aria-current="page === item.id ? 'page' : undefined"
           @click="page = item.id"
@@ -222,7 +226,7 @@ const on = computed(() =>
             @open-config="act({ type: 'openDataFolder' })"
           />
           <FileTransferPanel
-            v-else
+            v-else-if="page === 'files'"
             :transfers="files.transfers.value"
             :busy="files.busy.value"
             :error="files.error.value"
@@ -234,6 +238,7 @@ const on = computed(() =>
             :preview="state.preview"
             @action="files.act"
           />
+          <AboutPanel v-else-if="page === 'about'" />
         </main>
         <footer class="app-footer">
           <span

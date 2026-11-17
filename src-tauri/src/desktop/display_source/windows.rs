@@ -598,6 +598,28 @@ unsafe fn place(hwnd: HWND, activate: bool) -> Result<()> {
     }
     Ok(())
 }
+pub(super) fn file_panel_position(
+    icon: Option<(i32, i32, u32, u32)>,
+    width: i32,
+    height: i32,
+    gap: i32,
+) -> Result<(i32, i32)> {
+    let icon = icon.map(|(x, y, w, h)| Bounds {
+        left: x,
+        top: y,
+        right: x + w as i32,
+        bottom: y + h as i32,
+    });
+    let (info, bar) = unsafe { taskbar(icon)? };
+    Ok(position(
+        bounds(info.rcWork),
+        bounds(bar),
+        icon,
+        width,
+        height,
+        gap,
+    ))
+}
 pub(super) fn show(app: &tauri::AppHandle, view: View) -> Result<()> {
     let tray = app
         .tray_by_id("main-tray")

@@ -12,6 +12,7 @@ export function useFileDrop(
   element: () => HTMLElement | null,
   disabled: () => boolean,
   send: (token: string) => void,
+  target = 'main',
 ) {
   const dragging = shallowRef(false)
   const error = shallowRef('')
@@ -39,7 +40,7 @@ export function useFileDrop(
           error.value = payload.error ?? ''
           if (payload.token && !payload.error) send(payload.token)
         },
-        { target: 'main' },
+        { target },
       )
       if (disposed) stop()
       else unlisten = stop

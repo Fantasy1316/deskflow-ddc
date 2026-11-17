@@ -73,6 +73,10 @@ pub struct Config {
     pub deskflow_port: u16,
     pub deskflow_path: String,
     pub display_id: String,
+    #[serde(default)]
+    pub ddc_protocol: crate::ddc::ProtocolChoice,
+    #[serde(default)]
+    pub ddc_auto_protocol: crate::ddc::InputProtocol,
     pub local_input: Option<u16>,
     pub peer_input: Option<u16>,
     pub shortcut: String,
@@ -106,6 +110,8 @@ impl Default for Config {
             deskflow_port: 24801,
             deskflow_path: String::new(),
             display_id: String::new(),
+            ddc_protocol: Default::default(),
+            ddc_auto_protocol: Default::default(),
             local_input: None,
             peer_input: None,
             shortcut: "control+alt+F10".into(),
@@ -123,6 +129,9 @@ fn clean(s: &str, max: usize) -> bool {
     s.chars().count() <= max && !s.contains(['\r', '\n', '\0'])
 }
 impl Config {
+    pub fn input_protocol(&self) -> crate::ddc::InputProtocol {
+        self.ddc_protocol.resolve(self.ddc_auto_protocol)
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(clean(&self.output_id, 128), "显示输出标识无效");
         if self.display_method == DisplayMethod::Signal {
@@ -195,6 +204,10 @@ impl Config {
         self.validate()?;
         if self.display_method == DisplayMethod::Ddc {
             ensure!(
+                self.input_protocol().supported(platform()),
+                "当前系统暂不支持 input-alt，请选择标准输入控制"
+            );
+            ensure!(
                 !self.display_id.is_empty()
                     && self.local_input.is_some()
                     && self.peer_input.is_some(),
@@ -206,7 +219,7 @@ impl Config {
                 "请先配置自动选源使用的本机显示输出"
             );
             ensure!(
-                matches!(platform(), "darwin" | "win32"),
+                cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64")),
                 "自动选源兜底暂只支持 Apple Silicon macOS 和 Windows"
             );
         }

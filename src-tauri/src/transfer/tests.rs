@@ -841,3 +841,72 @@ async fn pausing_a_conflict_clears_the_prompt_and_allows_a_fresh_choice() {
     sender.shutdown().await;
     receiver.shutdown().await;
 }
+#[tokio::test]
+async fn observed_preparation_counts_real_entries_without_changing_offer_or_starting_network() {
+    let source = tempfile::tempdir().unwrap();
+    let directory = source.path().join("directory");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("file.txt"), b"abc").unwrap();
+    std::fs::create_dir(directory.join("empty")).unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let manager = super::Manager::new(store.path().to_owned()).unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let peer = uuid::Uuid::new_v4();
+    let id = manager
+        .prepare_observed(
+            vec![directory],
+            peer,
+            "peer".into(),
+            Some(std::sync::Arc::new(move |event| {
+                observed.lock().unwrap().push(event)
+            })),
+        )
+        .await
+        .unwrap();
+    let events = events.lock().unwrap();
+    assert!(matches!(
+        events.first(),
+        Some(super::PreparationProgress::Scanning(0))
+    ));
+    assert!(matches!(
+        events[events.len() - 2],
+        super::PreparationProgress::Scanning(3)
+    ));
+    assert!(
+        matches!(events.last(), Some(super::PreparationProgress::Ready(value)) if *value == id)
+    );
+    let job = manager.snapshot().pop().unwrap();
+    assert_eq!(
+        (job.entries, job.total_bytes, job.status.as_str()),
+        (3, 3, "paused")
+    );
+    assert!(manager.job(id).unwrap().endpoint.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn failed_observed_scan_never_reports_a_created_task() {
+    let store = tempfile::tempdir().unwrap();
+    let manager = super::Manager::new(store.path().to_owned()).unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = events.clone();
+    assert!(manager
+        .prepare_observed(
+            vec![store.path().join("missing")],
+            uuid::Uuid::new_v4(),
+            "peer".into(),
+            Some(std::sync::Arc::new(move |event| observed
+                .lock()
+                .unwrap()
+                .push(event)))
+        )
+        .await
+        .is_err());
+    assert!(!events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, super::PreparationProgress::Ready(_))));
+    assert!(manager.snapshot().is_empty());
+    assert!(!manager.preparing.load(std::sync::atomic::Ordering::Acquire));
+}

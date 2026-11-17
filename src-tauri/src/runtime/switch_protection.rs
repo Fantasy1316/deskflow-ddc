@@ -220,7 +220,10 @@ impl Runtime {
                         s.config.peer_input
                     };
                     self.platform
-                        .current_input(&s.config.display_id)
+                        .current_input_with_protocol(
+                            &s.config.display_id,
+                            s.config.input_protocol(),
+                        )
                         .await
                         .ok()
                         .flatten()
@@ -339,7 +342,11 @@ mod tests {
         std::fs::write(native.join("current"), "3").unwrap();
         for (name, script) in [
             (
-                "m1ddc",
+                if cfg!(target_arch = "x86_64") {
+                    "intel-ddc"
+                } else {
+                    "m1ddc"
+                },
                 r#"#!/bin/sh
 base="$(dirname "$0")"
 case "$3" in

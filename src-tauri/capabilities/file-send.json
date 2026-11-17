@@ -1,0 +1,5 @@
+{
+  "identifier": "file-send",
+  "windows": ["file-send"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

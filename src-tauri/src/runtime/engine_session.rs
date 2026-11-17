@@ -303,7 +303,7 @@ mod tests {
             let native = runtime.platform.resources.join("native/bin");
             std::fs::create_dir_all(&native).unwrap();
             let input = native.join("mac-hotkey");
-            let ddc = native.join("m1ddc");
+            let ddc = runtime.platform.mac_ddc_helper();
             for (file, script) in [
                 (&input, "#!/bin/sh\ncase \"$1\" in host|peer) echo \"$1\" >> \"$0.calls\"; echo sent ;; *) exit 9 ;; esac\n"),
                 (&ddc, "#!/bin/sh\ntest \"$3\" = set || exit 9\necho \"$5\" >> \"$0.calls\"\n"),

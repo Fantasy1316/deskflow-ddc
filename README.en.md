@@ -8,9 +8,16 @@
 
 Deskflow DDC helps two computers share a monitor, keyboard and mouse. It bundles **Deskflow 1.27.0**, so no separate input-sharing engine installation is needed. Either computer can provide the physical keyboard and mouse; roles are independent of the operating system.
 
-**Version 0.3.0** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
+**Version 0.3.1** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
 
 This is an independent project, not affiliated with the [Deskflow](https://github.com/deskflow/deskflow) maintainers. The application uses Rust, Tauri 2 and Vue 3. The current application interface is in Chinese; this README provides English usage instructions.
+
+## What's new in 0.3.1
+
+- Added an Intel Mac IOKit/I2C DDC backend and a complete x86_64 app, Deskflow engine and native dependencies. Intel support remains experimental, requires macOS 14+, and does not enable the output-disconnection fallback.
+- Added read-only protocol detection, protocol-specific input presets and locally verified monitor profiles. macOS supports the standard protocol and `input-alt` used by some LG models; ordinary switching never changes protocols automatically.
+- Added a tray file-send panel with directory-scanning and transfer status. Mac accepts files dropped onto the menu-bar icon; Windows opens the panel from its tray menu. Opening a file picker no longer closes the panel prematurely.
+- Added About and a manual stable-release update check. Upgrade both endpoints to 0.3.1 for full sharing. Ubuntu packages remain **Beta**.
 
 ## Features
 
@@ -23,15 +30,16 @@ This is an independent project, not affiliated with the [Deskflow](https://githu
 - **File and directory transfers:** encrypted direct transfers, large files, receiver approval, pause/resume, SHA-256 verification and name-conflict choices.
 - **Launch at login and automatic sharing:** separate options, both disabled by default.
 - **Status and recovery:** switching progress, source confirmation, tray reminders, output recovery and diagnostics from both computers.
+- **About and updates:** project links, usage guidance and a manual check for the latest stable release.
 - **Windows secure-desktop control:** an optional service for password/PIN entry after an already signed-in user locks Windows.
 
 ## Supported systems
 
-| Platform | Requirements                                         | Packages / status                                           |
-| -------- | ---------------------------------------------------- | ----------------------------------------------------------- |
-| macOS    | Apple Silicon, macOS 14+                             | Application archive; Intel Mac DDC control is not supported |
-| Windows  | Windows 10 / 11 x64, Microsoft Edge WebView2 Runtime | Installer; portable availability depends on the release     |
-| Ubuntu   | Ubuntu 24.04, x86_64 / ARM64, X11                    | **Beta / experimental**, DEB packages                       |
+| Platform | Requirements                                         | Packages / status                                                                          |
+| -------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| macOS    | Apple Silicon / Intel, macOS 14+                     | Architecture-specific archives; Intel support is experimental, pending hardware validation |
+| Windows  | Windows 10 / 11 x64, Microsoft Edge WebView2 Runtime | Installer; portable availability depends on the release                                    |
+| Ubuntu   | Ubuntu 24.04, x86_64 / ARM64, X11                    | **Beta / experimental**, DEB packages                                                      |
 
 Connect each computer to a different video input on the shared monitor. Full sharing requires network connectivity between the computers; display-only mode does not. Two computers running the same OS are also supported.
 
@@ -39,25 +47,30 @@ Ubuntu Beta does not support full sharing under Wayland/XWayland, secure-desktop
 
 ## Check monitor compatibility first
 
-DDC mode requires **DDC/CI** to be enabled and the monitor to support input switching through **VCP `0x60`**.
+DDC mode requires **DDC/CI** and input-switching support. Standard **VCP `0x60`** remains the default. macOS also supports **`input-alt` (VCP `0xF4` with alternate addressing)** used by some LG models.
+
+Apple Silicon uses m1ddc; Intel uses a bundled IOKit/I2C backend without additional tools. Choose `macos-arm64` or `macos-x86_64`; each includes matching Deskflow and native helper binaries. Experimental Intel support requires macOS 14+ and does not enable the output-disconnection fallback. Input read/write, switching in both directions and sleep recovery still require Intel hardware validation. DDC availability depends on the GPU, port and adapters; some built-in HDMI and DisplayLink paths may not expose DDC.
 
 1. Enable DDC/CI in the monitor's physical menu. Its name and location vary by manufacturer.
 2. On each computer, open the display settings page (**显示器与输入**), scan and select the shared monitor.
+   Click **开始检测** for read-only protocol detection, then **使用推荐配置** to apply a suggestion. Previously confirmed local profiles take priority, followed by a readable standard protocol. Detection never switches the picture or changes protocols during normal switching; unreadable protocols can still be configured and tested manually.
 3. Stop sharing and use the standalone input test (**单独测试显示器切换**) to test switching away and back from both computers. Keep the monitor's physical input selector available.
 
 **Detecting a monitor or reading its brightness does not establish input-switching support. Failure to read the current input does not establish that writes are unsupported.** Cables, docks and adapters can affect DDC. Some monitors accept commands only from the currently active video input, so test both directions.
+
+Interface presets depend on the selected protocol (for example, `input-alt` commonly uses `208` for DP 1 and `144` for HDMI 1). Save the mapping, test the other input and then return to the local input, separately confirm both pictures, then use **记住已验证配置** to remember it. Profiles are stored locally and matched by stable display identity and connection path, never by brand or name alone. Retest after changing cables, ports or computers. Windows and Ubuntu currently support the standard protocol only; each endpoint may need different protocol and input values.
 
 If DDC cannot be used, try the experimental compatibility mode below. Monitors without suitable automatic input selection still require physical controls or a hardware switch.
 
 ## Installation and upgrades
 
-1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.0 on both computers** for full sharing.
+1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.1 on both computers** for full sharing.
 2. Before upgrading, stop sharing and quit the old applications and any independent Deskflow instances on both computers. This application does not take over engines started by another application.
 3. On macOS, extract and move `Deskflow DDC.app` to Applications, then open it and grant the requested Accessibility/Input Monitoring permissions. Permissions can be checked again from the application. Permission for the main application does not necessarily grant permission to the bundled engine.
 4. On Windows, run the installer, or fully extract the portable package and open `Deskflow DDC.exe`. Keep its DLLs and `resources` directory together. Allow application network access through the firewall; install WebView2 Runtime if it is missing.
 5. If Windows secure-desktop control is enabled, **install/update the background service** from Sharing Settings after upgrading.
 
-Version 0.3.0 retains the 0.2-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
+Version 0.3.1 retains the 0.2-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
 
 The project currently does not provide Developer ID notarization or Windows publisher signing. Your OS may show an unknown-developer warning. Check the individual release and use packages from a trusted source.
 
@@ -111,6 +124,7 @@ This mode attempts to stop the original computer's video output so the monitor a
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Apple Silicon macOS | No BetterDisplay installation required. Keep the built-in display or another active display available. Mirrored outputs are unsupported. The system interface may be affected by macOS updates.                                    |
 | Windows             | Requires exactly one active external output. Multiple outputs, mirroring and internal-display selections are unsupported. Physical input or another application may wake the output early; recovery timing depends on the devices. |
+| Intel macOS         | Output-disconnection fallback is not supported; use DDC.                                                                                                                                                                           |
 | Ubuntu              | Not supported.                                                                                                                                                                                                                     |
 
 Switching proceeds in order: restore the destination output, transfer input, disable the original output, then acknowledge retention. It does not modify EDID. Completion records the requested destination but cannot directly verify the monitor's actual input. Confirm the source again after connection, reconnection or wake if it is unknown. Reaching a screen edge does not disable an output.
@@ -135,6 +149,8 @@ Test both directions and retain physical monitor controls, a local keyboard/mous
 2. Drop files or whole directories onto the send area, or click it to select files. Multiple files are supported; archives are sent as ordinary files and are not extracted.
 3. The receiver approves and chooses a destination. Items keep their original names, without an extra outer task directory. For conflicts, choose **Replace, Keep both or Stop**. Replacing a directory replaces it as a whole rather than merging it.
 4. View progress/speed, pause, resume or cancel. After pausing or restarting, choose **重新发送此任务** on the original sender task, then **继续接收** on the receiver; source selection does not need to be repeated.
+
+On macOS, drag files or directories onto the menu-bar icon to open a mini send panel; release on the icon or panel to send. On Windows, right-click the tray icon, choose **发送文件…** (Send Files), then drop items into the panel or click to select them. Both computers must remain connected in sharing mode. Hovering alone never sends; closing the panel does not stop a submitted transfer.
 
 Transfers stream data rather than loading whole files into memory. A separate encrypted channel and SHA-256 verification are used. File sending backs off when control latency increases to reduce interference with shared input. Actual speed depends on Wi-Fi, disks, file counts and verification work.
 
@@ -179,6 +195,10 @@ ddcutil getvcp 60
 
 If there is no `i2c` group, follow your distribution's device-access rules. The application does not elevate itself. Virtual machines usually do not pass through monitor DDC/I²C and cannot validate physical input switching. A keyboard/mouse-only mode without display configuration is not currently provided.
 
+## Checking for updates
+
+Open **关于我们 → 检查更新** to query the latest stable GitHub release, read its notes and follow **前往下载**. This requires GitHub access and does not automatically download, install or replace the application. Offline operation of configured LAN sharing is unaffected. Quit both old applications before updating, select the matching OS/architecture, and update the Windows secure-desktop service if used.
+
 ## Networking, privacy and reporting problems
 
 - Full sharing needs direct connectivity between the computers; a local network is the usual setup. mDNS discovery normally works only within one subnet. Guest networks, client isolation, VPNs and firewalls can block discovery; enter a hostname and backup IP manually when needed.
@@ -195,4 +215,4 @@ For bug reports, export diagnostics from **活动记录 → 导出诊断日志 o
 
 Original project code is under the [MIT License](LICENSE). Bundled Deskflow and other components retain their own licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md).
 
-Thanks to [Deskflow](https://github.com/deskflow/deskflow), [m1ddc](https://github.com/waydabber/m1ddc), [Tauri](https://tauri.app/), [Vue](https://vuejs.org/) and [Lucide](https://lucide.dev/).
+Thanks to [Deskflow](https://github.com/deskflow/deskflow), [m1ddc](https://github.com/waydabber/m1ddc), [MonitorControl](https://github.com/MonitorControl/MonitorControl), [Tauri](https://tauri.app/), [Vue](https://vuejs.org/) and [Lucide](https://lucide.dev/).

@@ -23,6 +23,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 mod display_source;
 mod file_drop;
+mod file_send;
 mod files;
 mod startup;
 
@@ -97,6 +98,11 @@ pub enum Action {
     TestInput {
         value: u16,
     },
+    DetectDdc {
+        #[serde(rename = "displayId")]
+        display_id: String,
+    },
+    RememberDdcProfile {},
     CheckOutput {},
     RestoreOutput {
         token: uuid::Uuid,
@@ -228,6 +234,8 @@ async fn dispatch(app: &tauri::AppHandle, runtime: &Arc<Runtime>, action: Action
             runtime.switch_to(target == "local").await
         }
         Action::TestInput { value } => runtime.test_input(value).await,
+        Action::DetectDdc { display_id } => runtime.detect_ddc(display_id).await,
+        Action::RememberDdcProfile {} => runtime.remember_ddc_profile().await,
         Action::ConfirmDisplaySource { target } => {
             ensure!(target == "local" || target == "peer", "无效的画面来源");
             runtime.confirm_display_source(target == "local").await
@@ -340,12 +348,34 @@ async fn report_error(
 }
 fn show(app: &tauri::AppHandle) {
     display_source::close(app);
+    file_send::hide(app);
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(target_os = "macos")]
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+fn sync_tray_tooltip(app: &tauri::AppHandle, snapshot: &Snapshot) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let status = if snapshot.local_output_recovery_pending {
+            "本机显示输出待恢复"
+        } else if snapshot.needs_signal_source_confirmation() {
+            "请确认当前画面"
+        } else if snapshot.engine == "ready" {
+            "共享中"
+        } else if snapshot.running {
+            "等待连接"
+        } else if snapshot.last_error.is_some() {
+            "需要处理"
+        } else {
+            "已停止"
+        };
+        let suffix = file_send::tooltip_suffix(app)
+            .map(|s| format!(" · {s}"))
+            .unwrap_or_default();
+        let _ = tray.set_tooltip(Some(format!("Deskflow DDC · {status}{suffix}")));
     }
 }
 #[derive(Clone)]
@@ -434,6 +464,7 @@ fn handle_menu(app: &tauri::AppHandle, id: &str) {
     match id {
         "show" => show(app),
         "confirm-source" => display_source::open(app),
+        "send-files" => file_send::open(app, true),
         "quit" => quit(app),
         _ => {
             let Some(action) = tray_action(id) else {
@@ -514,6 +545,7 @@ fn quit_from(app: &tauri::AppHandle, source: &'static str) {
         return;
     }
     display_source::close(app);
+    file_send::hide(app);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let runtime = app.state::<Arc<Runtime>>();
@@ -672,7 +704,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![snapshot, act, report_error, files::file_snapshot, files::file_action])
+        .invoke_handler(tauri::generate_handler![snapshot, act, report_error, files::file_snapshot, files::file_action, file_send::file_send_snapshot, file_send::file_send_action])
         .setup(|app| {
             let resource = if tauri::is_dev() {
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
@@ -702,6 +734,7 @@ pub fn run() {
             app.manage(ExitState::default());
             app.manage(display_source::Reminders::default());
             app.manage(file_drop::FileDrops::default());
+            app.manage(file_send::Panel::new(&tauri::async_runtime::block_on(runtime.snapshot())));
             #[cfg(target_os = "macos")]
             install_dock_quit(app.handle())?;
             let show_item = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
@@ -729,6 +762,8 @@ pub fn run() {
                 &PredefinedMenuItem::separator(app)?,
                 &quit_item,
             ])?;
+            #[cfg(any(target_os = "macos", windows))]
+            menu.insert(&MenuItem::with_id(app, "send-files", "发送文件…", true, None::<&str>)?, 1)?;
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::Submenu;
@@ -787,6 +822,11 @@ pub fn run() {
             if let Err(e) = tray {
                 eprintln!("Tray unavailable: {e}");
             }
+            if has_tray {
+                if let Err(error) = file_send::install(app.handle()) {
+                    tauri::async_runtime::block_on(runtime.log("error", &format!("托盘文件拖放不可用，仍可从菜单打开文件发送面板：{error:#}")));
+                }
+            }
             // The global handler also receives tray events. Register only once
             // so a click cannot dispatch the same switch or stop twice.
             app.on_menu_event(|app, event| handle_menu(app, event.id.as_ref()));
@@ -830,15 +870,8 @@ pub fn run() {
                 while updates.changed().await.is_ok() {
                     let snapshot = updates.borrow_and_update().clone();
                     controls.sync(&snapshot);
-                    if let Some(tray) = handle.tray_by_id("main-tray") {
-                        let status = if snapshot.local_output_recovery_pending { "本机显示输出待恢复" }
-                            else if snapshot.needs_signal_source_confirmation() { "请确认当前画面" }
-                            else if snapshot.engine == "ready" { "共享中" }
-                            else if snapshot.running { "等待连接" }
-                            else if snapshot.last_error.is_some() { "需要处理" }
-                            else { "已停止" };
-                        let _ = tray.set_tooltip(Some(format!("Deskflow DDC · {status}")));
-                    }
+                    file_send::sync(&handle, &snapshot);
+                    sync_tray_tooltip(&handle, &snapshot);
                     let _ = handle.emit_to("main", "bridge-state", snapshot);
                 }
             });

@@ -23,6 +23,8 @@ export const actionLabels: Partial<Record<ActionFailure['action'], string>> = {
   confirmDisplaySource: '确认当前画面来源',
   detectDisplaySource: '检测当前输入源',
   testInput: '测试显示器输入',
+  detectDdc: '检测输入控制方式',
+  rememberDdcProfile: '记住已验证的输入配置',
   checkOutput: '检测显示输出',
   restoreOutput: '恢复显示输出',
   emergencyStop: '停止共享并恢复输出',

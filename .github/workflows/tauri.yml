@@ -31,6 +31,9 @@ jobs:
           - os: macos-15
             bundle: app
             name: macos-arm64
+          - os: macos-15-intel
+            bundle: app
+            name: macos-x86_64
           - os: windows-latest
             bundle: nsis
             name: windows-x64
@@ -58,7 +61,7 @@ jobs:
         with:
           path: .engine-cache
           key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/prepare-windows-bundler.mjs', 'scripts/download-verified.mjs') }}
-      - run: node --test scripts/download-verified.test.mjs
+      - run: node --test scripts/download-verified.test.mjs scripts/macos-architecture.test.mjs
       - run: pnpm prepare:engine
       - if: runner.os == 'Windows'
         run: node scripts/prepare-windows-bundler.mjs
@@ -78,7 +81,7 @@ jobs:
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test bundled_runtime -- --ignored
       - run: pnpm build:tauri --bundles ${{ matrix.bundle }}
       - if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/Deskflow DDC.app' 'Deskflow-DDC-macos-arm64.zip'
+        run: ditto -c -k --sequesterRsrc --keepParent 'src-tauri/target/release/bundle/macos/Deskflow DDC.app' 'Deskflow-DDC-${{ matrix.name }}.zip'
       - uses: actions/upload-artifact@v4
         with:
           name: deskflow-ddc-${{ matrix.name }}

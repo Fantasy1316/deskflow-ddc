@@ -1,5 +1,18 @@
 {
   "identifier": "main",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc" },
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc/blob/main/README.md" },
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc/releases" },
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc/issues" },
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc/blob/main/LICENSE" },
+        { "url": "https://github.com/Fantasy1316/deskflow-ddc/blob/main/THIRD_PARTY_NOTICES.md" }
+      ]
+    }
+  ]
 }

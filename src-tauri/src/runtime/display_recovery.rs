@@ -281,7 +281,7 @@ mod tests {
             let native = runtime.platform.resources.join("native/bin");
             std::fs::create_dir_all(&native).unwrap();
             let hotkey = native.join("mac-hotkey");
-            let ddc = native.join("m1ddc");
+            let ddc = runtime.platform.mac_ddc_helper();
             for (file, script) in [
                 (&hotkey, "#!/bin/sh\necho \"$1\" >> \"$0.calls\"\necho sent\n"),
                 (&ddc, "#!/bin/sh\nif test \"$3\" = get; then test ! -f \"$0.written\" || exit 1; echo 3; exit 0; fi\nif test \"$3\" = set; then echo \"$5\" >> \"$0.written\"; exit 0; fi\nexit 9\n"),
@@ -437,7 +437,7 @@ mod tests {
                     modifier_mapping: ModifierMapping::Original,
                 });
             }
-            let helper = runtime.platform.resources.join("native/bin/m1ddc");
+            let helper = runtime.platform.mac_ddc_helper();
             std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
             let source_file = helper.with_extension("source");
             std::fs::write(&source_file, if actual_local { "3" } else { "1" }).unwrap();

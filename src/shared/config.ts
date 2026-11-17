@@ -48,6 +48,8 @@ export const configSchema = z.preprocess(
         .max(512)
         .refine((v) => !/[\r\n\0]/.test(v)),
       localInput: z.number().int().min(0).max(65535).nullable(),
+      ddcProtocol: z.enum(['auto', 'standard', 'input-alt']).default('auto'),
+      ddcAutoProtocol: z.enum(['standard', 'input-alt']).default('standard'),
       peerInput: z.number().int().min(0).max(65535).nullable(),
       shortcut: z.string().regex(/^(control\+alt\+(shift\+)?)(F(?:[1-9]|1[0-7]))$/),
       modifierMapping: z.enum(['original', 'common']).default('original'),
@@ -90,6 +92,8 @@ export function defaultConfig(deviceName: string): Config {
     deskflowPort: 24801,
     deskflowPath: '',
     displayId: '',
+    ddcProtocol: 'auto',
+    ddcAutoProtocol: 'standard',
     localInput: null,
     peerInput: null,
     shortcut: 'control+alt+F10',

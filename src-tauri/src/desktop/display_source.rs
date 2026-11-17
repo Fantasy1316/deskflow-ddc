@@ -12,6 +12,16 @@ mod native;
 #[cfg(any(windows, test))]
 mod geometry;
 
+#[cfg(windows)]
+pub(super) fn file_panel_position(
+    icon: Option<(i32, i32, u32, u32)>,
+    width: i32,
+    height: i32,
+    gap: i32,
+) -> Result<(i32, i32)> {
+    native::file_panel_position(icon, width, height, gap)
+}
+
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 #[derive(Default)]
@@ -208,6 +218,7 @@ async fn present(app: &tauri::AppHandle) -> Result<()> {
     let (send, receive) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app.run_on_main_thread(move || {
+        super::file_send::hide(&handle);
         #[cfg(any(target_os = "macos", windows))]
         let result = native::show(&handle, view);
         #[cfg(not(any(target_os = "macos", windows)))]

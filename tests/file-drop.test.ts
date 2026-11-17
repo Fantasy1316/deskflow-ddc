@@ -18,7 +18,7 @@ type Drag = {
   token?: string
   error?: string
 }
-function fixture() {
+function fixture(target?: string) {
   const stop = vi.fn()
   let handle!: (event: { payload: Drag }) => void
   bridge.listen.mockImplementation((_event, callback) => {
@@ -34,6 +34,7 @@ function fixture() {
     () => element,
     () => disabled,
     send,
+    target,
   )
   return {
     state,
@@ -55,6 +56,7 @@ it('uses normalized logical coordinates without scaling them again on Retina', a
   vi.stubGlobal('devicePixelRatio', 2)
   const f = fixture()
   await bridge.mounted[0]!()
+  expect(bridge.listen).toHaveBeenCalledWith('file-drag', expect.any(Function), { target: 'main' })
   f.event({ kind: 'enter', position: { x: 40, y: 60 } })
   expect(f.state.dragging.value).toBe(true)
   f.event({ kind: 'over', position: { x: 220, y: 60 } })
@@ -67,6 +69,16 @@ it('uses normalized logical coordinates without scaling them again on Retina', a
   f.event({ kind: 'drop', position: { x: 40, y: 60 }, token: 'native-token' })
   expect(f.send).toHaveBeenCalledExactlyOnceWith('native-token')
   expect(f.state.dragging.value).toBe(false)
+})
+it('isolates mini-panel highlighting from the main window and never sends on hover', async () => {
+  const f = fixture('file-send')
+  await bridge.mounted[0]!()
+  expect(bridge.listen).toHaveBeenCalledWith('file-drag', expect.any(Function), {
+    target: 'file-send',
+  })
+  f.event({ kind: 'enter', position: { x: 40, y: 60 } })
+  expect(f.state.dragging.value).toBe(true)
+  expect(f.send).not.toHaveBeenCalled()
 })
 it('ignores disabled drops and clears highlighting when the drag leaves', async () => {
   const f = fixture()

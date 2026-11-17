@@ -152,6 +152,7 @@ svg {
 }
 .brand {
   display: flex;
+  flex-shrink: 0;
   gap: 11px;
   align-items: center;
   padding: 0 5px;
@@ -182,6 +183,7 @@ svg {
   letter-spacing: 0.6px;
 }
 .nav-caption {
+  flex-shrink: 0;
   font-size: 10px;
   color: #7f958d;
   letter-spacing: 1.4px;
@@ -191,9 +193,12 @@ svg {
 .nav-list {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
   gap: 7px;
 }
 .nav-item {
+  flex-shrink: 0;
   border: 0;
   background: transparent;
   text-align: left;
@@ -233,6 +238,7 @@ svg {
 }
 .sidebar-bottom {
   margin-top: auto;
+  flex-shrink: 0;
 }
 .local-device {
   display: flex;
@@ -1162,6 +1168,11 @@ kbd {
   }
   .setup-step p {
     font-size: 9px;
+  }
+}
+@media (max-height: 700px) {
+  .brand {
+    margin-bottom: 32px;
   }
 }
 @media (max-width: 1050px) {

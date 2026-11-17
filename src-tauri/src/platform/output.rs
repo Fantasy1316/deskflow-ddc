@@ -12,6 +12,11 @@ impl Platform {
         Ok(())
     }
     pub async fn output_list(&self) -> Result<Value> {
+        // Intel's DDC backend is independent of the experimental output API.
+        // Do not advertise an output as disconnectable merely because it is visible.
+        if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            return Ok(serde_json::json!([]));
+        }
         match platform() {
             "darwin" => Ok(serde_json::from_str(
                 &self.run(self.output_helper(), &["list".into()]).await?,

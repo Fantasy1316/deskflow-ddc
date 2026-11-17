@@ -1,4 +1,5 @@
 mod control;
+mod ddc_setup;
 mod display_only;
 mod display_recovery;
 mod display_source;
@@ -87,6 +88,10 @@ pub struct Snapshot {
     pub cursor_displays: Vec<Panel>,
     pub session_layout: Option<Layout>,
     pub monitors: Value,
+    pub ddc_profiles: Vec<crate::ddc::Profile>,
+    pub ddc_detection: Option<crate::ddc::Detection>,
+    #[serde(skip_serializing)]
+    ddc_test_receipt: Option<crate::ddc::TestReceipt>,
     pub running: bool,
     pub listening: bool,
     pub connected: bool,
@@ -132,6 +137,9 @@ impl Snapshot {
             cursor_displays: vec![],
             session_layout: None,
             monitors: json!([]),
+            ddc_profiles: store.value.ddc_profiles.clone(),
+            ddc_detection: None,
+            ddc_test_receipt: None,
             running: false,
             listening: false,
             connected: false,
@@ -397,6 +405,29 @@ impl Runtime {
         self.inner.lock().await.state.clone()
     }
     pub async fn send_files(self: &Arc<Self>, paths: Vec<PathBuf>) -> Result<()> {
+        self.prepare_files(paths, None, None).await
+    }
+    pub async fn send_files_to(
+        self: &Arc<Self>,
+        paths: Vec<PathBuf>,
+        peer: uuid::Uuid,
+    ) -> Result<()> {
+        self.prepare_files(paths, Some(peer), None).await
+    }
+    pub async fn send_files_observed(
+        self: &Arc<Self>,
+        paths: Vec<PathBuf>,
+        peer: uuid::Uuid,
+        observer: crate::transfer::PreparationObserver,
+    ) -> Result<()> {
+        self.prepare_files(paths, Some(peer), Some(observer)).await
+    }
+    async fn prepare_files(
+        self: &Arc<Self>,
+        paths: Vec<PathBuf>,
+        expected_peer: Option<uuid::Uuid>,
+        observer: Option<crate::transfer::PreparationObserver>,
+    ) -> Result<()> {
         let link = self
             .link
             .lock()
@@ -405,11 +436,18 @@ impl Runtime {
             .context("请先连接已配对的电脑")?;
         let peer = link.peer.borrow().clone().context("尚未识别对端设备")?;
         ensure!(
+            expected_peer.is_none_or(|expected| expected == peer.id),
+            "连接的电脑已更换，请确认目标后重新发送"
+        );
+        ensure!(
             peer.file_protocol == 1,
             "对端不支持文件传输，请更新两端应用"
         );
         ensure!(self.current(&link), "配对连接已断开");
-        let id = self.transfers.prepare(paths, peer.id, peer.name).await?;
+        let id = self
+            .transfers
+            .prepare_observed(paths, peer.id, peer.name, observer)
+            .await?;
         self.resume_transfer(id).await
     }
     pub async fn resume_transfer(&self, id: uuid::Uuid) -> Result<()> {
@@ -555,6 +593,10 @@ impl Runtime {
     }
     pub async fn save(&self, c: Config) -> Result<()> {
         c.validate()?;
+        ensure!(
+            c.display_method != DisplayMethod::Ddc || c.input_protocol().supported(platform()),
+            "当前系统暂不支持 input-alt，请选择标准输入控制"
+        );
         let _lifecycle = self.start_stop.lock().await;
         {
             let mut i = self.inner.lock().await;
@@ -569,10 +611,12 @@ impl Runtime {
                 || old.display_method != c.display_method
                 || old.output_id != c.output_id
                 || old.display_id != c.display_id
+                || old.input_protocol() != c.input_protocol()
                 || old.local_input != c.local_input
                 || old.peer_input != c.peer_input
             {
                 i.state.reset_display();
+                i.state.ddc_test_receipt = None;
             }
             i.state.output_check = None;
             i.state.config = c.clone();
@@ -604,7 +648,7 @@ impl Runtime {
             let outputs = self.platform.output_list().await?;
             self.inner.lock().await.state.output_displays = outputs;
         } else {
-            let monitors = self.platform.list().await?;
+            let monitors = self.platform.list_for(&state.config).await?;
             self.inner.lock().await.state.monitors = monitors;
         }
         self.publish();
@@ -1113,6 +1157,7 @@ mod tests {
             directory: dir.path().into(),
             value: crate::store::Stored {
                 version: 3,
+                ddc_profiles: vec![],
                 startup: crate::startup::Preferences::default(),
                 id: uuid::Uuid::new_v4(),
                 config: Config::default(),
@@ -1216,6 +1261,29 @@ mod tests {
             layout_side: "off".into(),
             cross_screen_video: "follow".into(),
             retained_display: false,
+        }
+    }
+    #[tokio::test]
+    async fn tray_send_rejects_a_changed_peer_before_scanning_or_offering_in_either_role() {
+        for role in ["host", "client"] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = pointer_bridge::tests::fixture(directory.path(), role);
+            let (remote, mut requests) =
+                pointer_bridge::tests::attach_with_requests(&runtime).await;
+            let identity = peer();
+            let link = runtime.link.lock().await.clone().unwrap();
+            link.peer.send_replace(Some(identity));
+            let error = runtime
+                .send_files_to(
+                    vec![directory.path().join("does-not-exist")],
+                    uuid::Uuid::new_v4(),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("连接的电脑已更换"));
+            assert!(runtime.transfers.snapshot().is_empty());
+            assert!(requests.try_recv().is_err());
+            remote.close();
         }
     }
     #[test]

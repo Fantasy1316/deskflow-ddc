@@ -1,5 +1,6 @@
 import { prepareLinux } from './prepare-engine-linux.mjs'
 import { downloadVerified } from './download-verified.mjs'
+import { macArchitecture, verifyMacArchitecture } from './macos-architecture.mjs'
 import { execFileSync } from 'node:child_process'
 import {
   cpSync,
@@ -21,15 +22,16 @@ function argument(name, fallback) {
   return at < 0 ? fallback : process.argv[at + 1]
 }
 const platform = argument('--platform', process.platform)
-const arch = argument('--arch', process.arch)
+const requestedArch = argument('--arch', process.arch)
+const arch = platform === 'darwin' ? macArchitecture(requestedArch).arch : requestedArch
 if (
   !(
-    (platform === 'darwin' && arch === 'arm64') ||
+    (platform === 'darwin' && ['arm64', 'x64'].includes(arch)) ||
     (platform === 'win32' && arch === 'x64') ||
     (platform === 'linux' && ['x64', 'arm64'].includes(arch))
   )
 ) {
-  throw new Error('Supported engine targets: macOS arm64, Windows x64, Ubuntu x64/arm64.')
+  throw new Error('Supported engine targets: macOS arm64/x64, Windows x64, Ubuntu x64/arm64.')
 }
 const cache = resolve(argument('--cache', join(root, '.engine-cache')))
 const destination = resolve(argument('--dest', join(root, 'src-tauri/resources')))
@@ -38,9 +40,13 @@ mkdirSync(destination, { recursive: true })
 const version = '1.27.0'
 const sourceRevision = '081f6478e654a112168879e67a41ce7d7e4ae3af'
 const assets = {
-  darwin: {
+  'darwin-arm64': {
     name: `deskflow-${version}-macos-arm64.dmg`,
     sha256: 'dd21e79e566314394214906d3338c505d337af536fc580c022ee3fadffad0c97',
+  },
+  'darwin-x64': {
+    name: `deskflow-${version}-macos-x86_64.dmg`,
+    sha256: '8aca3c77a1b16b9a3d6b8a380e5e38a0e6abf6d241bb32dcf3cf8b67abbff5d8',
   },
   win32: {
     name: `deskflow-${version}-win-x64-portable.zip`,
@@ -62,7 +68,7 @@ if (platform === 'linux') {
   prepareLinux({ root, cache, destination, source, sourceRevision, version, digest, download })
   process.exit(0)
 }
-const asset = assets[platform]
+const asset = assets[platform === 'darwin' ? `darwin-${arch}` : platform]
 const archive = download(
   asset.name,
   `https://github.com/deskflow/deskflow/releases/download/v${version}/${asset.name}`,
@@ -90,6 +96,8 @@ try {
       recursive: true,
       verbatimSymlinks: true,
     })
+    const nativeFiles = verifyMacArchitecture(join(target, 'Deskflow.app'), arch)
+    console.log(`Verified ${nativeFiles} native engine files for macOS/${arch}`)
   } else {
     if (process.platform === 'win32') {
       const script = join(staging, 'extract.ps1')
@@ -169,14 +177,22 @@ try {
   )
   mkdirSync(join(destination, 'native'), { recursive: true })
   if (platform === 'darwin') {
-    execFileSync(process.execPath, [join(root, 'scripts/build-native.mjs')], {
-      cwd: root,
-      stdio: 'inherit',
-    })
-    cpSync(join(root, 'resources/bin'), join(destination, 'native/bin'), { recursive: true })
+    const nativeBin = join(destination, 'native/bin')
+    rmSync(nativeBin, { recursive: true, force: true })
+    execFileSync(
+      process.execPath,
+      [join(root, 'scripts/build-native.mjs'), '--arch', arch, '--dest', nativeBin],
+      {
+        cwd: root,
+        stdio: 'inherit',
+      },
+    )
   } else cpSync(join(root, 'native/windows/monitor.ps1'), join(destination, 'native/monitor.ps1'))
   cpSync(join(root, 'resources/vendor/m1ddc/LICENSE'), join(destination, 'native/M1DDC-LICENSE'))
   cpSync(join(root, 'resources/vendor/m1ddc'), join(destination, 'vendor/m1ddc'), {
+    recursive: true,
+  })
+  cpSync(join(root, 'resources/vendor/intel-ddc'), join(destination, 'vendor/intel-ddc'), {
     recursive: true,
   })
   cpSync(join(root, 'resources/JS-NOTICES.txt'), join(destination, 'JS-NOTICES.txt'))

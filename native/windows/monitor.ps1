@@ -20,7 +20,7 @@ public static class ScreenBridgeNative {
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string id;
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string key;
   }
-  public class Item { public string id; public string name; public uint? currentInput; public bool readable; }
+  public class Item { public string identity; public string id; public string name; public uint? currentInput; public bool readable; }
   [StructLayout(LayoutKind.Sequential)] public struct Luid { public uint low; public int high; }
   [StructLayout(LayoutKind.Sequential)] public struct Source { public Luid adapter; public uint id, mode, status; }
   [StructLayout(LayoutKind.Sequential)] public struct Rate { public uint numerator, denominator; }
@@ -190,7 +190,11 @@ public static class ScreenBridgeNative {
             if(id==selected) { matched=true; if(!SetVCPFeature(physical[i].handle,0x60,(uint)value.Value)) failure=new Win32Exception(Marshal.GetLastWin32Error(), "DDC input write failed"); }
           } else if(String.IsNullOrEmpty(selected) || id==selected) {
             uint type,current,max; bool readable=GetVCPFeatureAndVCPFeatureReply(physical[i].handle,0x60,out type,out current,out max);
-            result.Add(new Item { id=id,name=physical[i].description,currentInput=readable?(uint?)current:null,readable=readable });
+            string identity=null;
+            // Cache profiles only for one unambiguous physical target. Keep the
+            // existing DDC selector unchanged for old saved configurations.
+            if(count==1) { try { var paths=new List<string>(MonitorInterfaces(info.device)); if(paths.Count==1) identity=StableScreenId(paths); } catch { } }
+            result.Add(new Item { identity=identity,id=id,name=physical[i].description,currentInput=readable?(uint?)current:null,readable=readable });
           }
         }
       } catch(Exception ex) {failure=ex;} finally {DestroyPhysicalMonitors(count,physical);}

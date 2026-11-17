@@ -15,9 +15,20 @@ export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('restoreOutput'), token: z.string().uuid() }).strict(),
   z.object({ type: z.literal('scanDisplays'), method: z.enum(['ddc', 'signal']) }).strict(),
   z.object({ type: z.literal('testInput'), value: z.number().int().min(0).max(65535) }).strict(),
+  z
+    .object({
+      type: z.literal('detectDdc'),
+      displayId: z
+        .string()
+        .min(1)
+        .max(512)
+        .refine((v) => !/[\r\n\0]/.test(v)),
+    })
+    .strict(),
   ...(
     [
       'checkOutput',
+      'rememberDdcProfile',
       'detectDisplaySource',
       'emergencyStop',
       'lockPeer',

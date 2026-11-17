@@ -129,6 +129,13 @@ pub fn stamp(meta: &fs::Metadata) -> Result<String> {
         .to_string())
 }
 pub fn scan(paths: Vec<PathBuf>, cancel: &CancellationToken) -> Result<Manifest> {
+    scan_with_progress(paths, cancel, &mut |_| {})
+}
+pub fn scan_with_progress(
+    paths: Vec<PathBuf>,
+    cancel: &CancellationToken,
+    progress: &mut dyn FnMut(usize),
+) -> Result<Manifest> {
     ensure!(
         !paths.is_empty() && paths.len() <= 256,
         "一次最多选择 256 个文件或目录"
@@ -139,6 +146,7 @@ pub fn scan(paths: Vec<PathBuf>, cancel: &CancellationToken) -> Result<Manifest>
         out: &mut Vec<Source>,
         cancel: &CancellationToken,
         path_bytes: &mut usize,
+        progress: &mut dyn FnMut(usize),
     ) -> Result<()> {
         ensure!(!cancel.is_cancelled(), "文件扫描已取消");
         ensure!(
@@ -173,6 +181,7 @@ pub fn scan(paths: Vec<PathBuf>, cancel: &CancellationToken) -> Result<Manifest>
             entry: e,
             source: source.clone(),
         });
+        progress(out.len());
         if m.is_dir() {
             let mut children = Vec::new();
             for child in fs::read_dir(&source)? {
@@ -196,6 +205,7 @@ pub fn scan(paths: Vec<PathBuf>, cancel: &CancellationToken) -> Result<Manifest>
                     out,
                     cancel,
                     path_bytes,
+                    progress,
                 )?;
             }
         }
@@ -211,7 +221,7 @@ pub fn scan(paths: Vec<PathBuf>, cancel: &CancellationToken) -> Result<Manifest>
             .context("无法发送磁盘根目录")?
             .to_owned();
         safe_name(&name)?;
-        visit(path, name, &mut sources, cancel, &mut path_bytes)?;
+        visit(path, name, &mut sources, cancel, &mut path_bytes, progress)?;
     }
     let entries: Vec<_> = sources.iter().map(|s| s.entry.clone()).collect();
     Ok(Manifest {

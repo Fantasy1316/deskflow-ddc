@@ -216,6 +216,7 @@ pub(super) mod tests {
             directory: directory.into(),
             value: crate::store::Stored {
                 version: 3,
+                ddc_profiles: vec![],
                 startup: crate::startup::Preferences::default(),
                 id: uuid::Uuid::new_v4(),
                 config: Config {
@@ -515,7 +516,7 @@ pub(super) mod tests {
                     fingerprint: "a".repeat(64),
                 });
             }
-            let helper = runtime.platform.resources.join("native/bin/m1ddc");
+            let helper = runtime.platform.mac_ddc_helper();
             std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
             std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -710,7 +711,7 @@ pub(super) mod tests {
         }
         // Only a same-target write is allowed. A read or key injection must not
         // be used to infer the toggle target from stale VCP/keyboard state.
-        let helper = runtime.platform.resources.join("native/bin/m1ddc");
+        let helper = runtime.platform.mac_ddc_helper();
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
         std::fs::write(
             &helper,
@@ -784,7 +785,7 @@ pub(super) mod tests {
                     modifier_mapping: ModifierMapping::Original,
                 });
             }
-            let helper = runtime.platform.resources.join("native/bin/m1ddc");
+            let helper = runtime.platform.mac_ddc_helper();
             std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
             let fail_local = local_first || retry_fails;
             std::fs::write(
@@ -895,7 +896,7 @@ pub(super) mod tests {
                             modifier_mapping: ModifierMapping::Original,
                         });
                     }
-                    let helper = runtime.platform.resources.join("native/bin/m1ddc");
+                    let helper = runtime.platform.mac_ddc_helper();
                     std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
                     let value = if target_local { 3 } else { 1 };
                     std::fs::write(&helper, format!(

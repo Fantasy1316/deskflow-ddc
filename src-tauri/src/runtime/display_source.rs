@@ -409,7 +409,7 @@ mod tests {
                 modifier_mapping: ModifierMapping::Original,
             });
         }
-        let helper = runtime.platform.resources.join("native/bin/m1ddc");
+        let helper = runtime.platform.mac_ddc_helper();
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
         std::fs::write(
             &helper,
@@ -704,7 +704,7 @@ cat "$base/value"
     async fn detection_is_serialized_and_disconnect_cancels_without_committing_an_old_read() {
         let f = setup(Some(3), None).await;
         // Pause the native test script before returning its observation.
-        let helper = f.runtime.platform.resources.join("native/bin/m1ddc");
+        let helper = f.runtime.platform.mac_ddc_helper();
         std::fs::write(&helper, "#!/bin/sh\nsleep 1\necho 3\n").unwrap();
         let link = f.runtime.link.lock().await.clone().unwrap();
         let runtime = f.runtime.clone();

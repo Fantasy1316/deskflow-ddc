@@ -13,7 +13,10 @@ const props = defineProps<{
   execute: ActionRunner
 }>()
 const pending = shallowRef<InputTarget | null>(null)
-const { results, test, confirm } = useDisplayTest(() => props.config, props.execute)
+const { results, test, confirm, canRemember, remembered, remember } = useDisplayTest(
+  () => props.config,
+  props.execute,
+)
 const labels = {
   idle: '尚未测试',
   sending: '正在发送指令…',
@@ -35,7 +38,9 @@ async function send() {
       <span class="step-number">3</span>
       <div>
         <h2 id="display-test-title">测试并确认实际画面</h2>
-        <p>每个方向都需要测试。测试记录仅在当前页面有效，不会保存为硬件认证。</p>
+        <p>
+          先测试另一台输入，再测试切回本机，并分别确认画面。测试状态在当前页面有效；完成往返测试后，可记住本机配置供下次推荐。
+        </p>
       </div>
     </div>
     <p class="inline-info">
@@ -69,6 +74,16 @@ async function send() {
           </div>
         </div>
       </div>
+    </div>
+    <div v-if="canRemember" class="form-footer">
+      <span>{{
+        remembered
+          ? '已记住本机显示器配置；更换线缆或接口后请重新测试'
+          : '两个方向均已由你确认，可保存为这台显示器的优先推荐'
+      }}</span>
+      <button class="button primary" :disabled="disabled || remembered" @click="remember">
+        {{ remembered ? '已记住配置' : '记住已验证配置' }}
+      </button>
     </div>
     <div
       v-if="pending && !disabled"

@@ -4,6 +4,10 @@
 
 The Apple Silicon DDC helper is built from [waydabber/m1ddc](https://github.com/waydabber/m1ddc), under the MIT license. Source, license and exact revision are included in `resources/vendor/m1ddc/`. The binary is built locally. Deskflow DDC patches the upstream read conversion to use 16-bit lengths and validates Get VCP response headers, feature code, status and checksum before displaying a value; `headers/ddc_reply.h` is a local addition. The upstream `LICENSE` is distributed next to the helper in packaged applications.
 
+## Intel DDC reference
+
+The Intel Mac helper (`native/mac-intel-ddc.m` and `.h`) uses IOKit/I2C and was informed by [MonitorControl's IntelDDC.swift](https://github.com/MonitorControl/MonitorControl/blob/7cfe64500d19cbbcbf82121a91c826f658a403bd/MonitorControl/Support/IntelDDC.swift), under the MIT license. Credit: MonitorControl, @JoniVR, @theOneyouseek, @waydabber and others, with the original IntelDDC reference by @reitermarkus. Its MIT notice and reference revision are distributed in `resources/vendor/intel-ddc/`. MonitorControl does not need to be installed.
+
 ## Deskflow
 
 [Deskflow](https://github.com/deskflow/deskflow) 1.27.0 is bundled as a separate, unmodified `deskflow-core` process, with its official runtime dependencies. It is not linked into the Rust application. The macOS/Windows runtime is prepared from official release assets verified with pinned SHA-256 digests. Experimental Ubuntu builds compile the same pinned source on the target Ubuntu baseline. Its corresponding source at commit `081f6478e654a112168879e67a41ce7d7e4ae3af` and license texts are shipped in `resources/deskflow/` inside each application. This project is independent of the Deskflow maintainers.
