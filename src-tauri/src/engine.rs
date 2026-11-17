@@ -128,16 +128,18 @@ fn server_config_for_platform(
     {
         text += &format!("\tkeystroke({}) = switchToNextScreen\n", chord(&c.shortcut));
     }
+    text += &format!(
+        "\tkeystroke({}) = switchToScreen(sb-{host})\n",
+        chord("control+alt+Escape")
+    );
     let (to_host, to_peer) = transfer_shortcuts(platform);
-    for (key, target) in [
-        ("control+alt+Escape", host),
-        (to_host, host),
-        (to_peer, client),
-    ] {
-        text += &format!(
-            "\tkeystroke({}) = switchToScreen(sb-{target})\n",
-            chord(key)
-        );
+    for (key, target) in [(to_host, host), (to_peer, client)] {
+        for key in transfer_shortcut_variants(platform, key) {
+            text += &format!(
+                "\tkeystroke({}) = switchToScreen(sb-{target})\n",
+                chord(&key)
+            );
+        }
     }
     text += "end\n";
     Ok(text)
@@ -196,9 +198,33 @@ fn transfer_shortcuts(platform: &str) -> (&'static str, &'static str) {
         // F18/F19 are often absent from standard XKB maps. The extra Super
         // modifier keeps these internal chords distinct from user shortcuts.
         ("control+alt+super+shift+F7", "control+alt+super+shift+F8")
+    } else if platform == "win32" {
+        // Only inject the reserved function key. Synthetic modifiers can
+        // straddle a computer switch and pollute the provider's shadow state.
+        ("F18", "F19")
     } else {
         ("control+alt+shift+F18", "control+alt+shift+F19")
     }
+}
+fn transfer_shortcut_variants(platform: &str, key: &str) -> Vec<String> {
+    if platform != "win32" {
+        return vec![key.into()];
+    }
+    // Deskflow matches hotkeys against the provider's exact modifier state.
+    // Accept every combination on these two reserved keys so a real held
+    // modifier never needs to be released or synthesized by the application.
+    (0..16)
+        .map(|mask| {
+            let mut parts = Vec::new();
+            for (bit, modifier) in [(1, "control"), (2, "alt"), (4, "shift"), (8, "super")] {
+                if mask & bit != 0 {
+                    parts.push(modifier);
+                }
+            }
+            parts.push(key);
+            parts.join("+")
+        })
+        .collect()
 }
 fn computer_settings(c: &Config, local: &str, peer: &Identity, local_platform: &str) -> String {
     let (host, client, mode) = if c.role == "host" {
@@ -814,7 +840,75 @@ mod tests {
             };
             assert!(config.validate().is_err());
         }
-        assert_eq!(transfer_shortcuts("win32").0, "control+alt+shift+F18");
+        assert_eq!(transfer_shortcuts("win32"), ("F18", "F19"));
+        assert_eq!(
+            transfer_shortcuts("darwin"),
+            ("control+alt+shift+F18", "control+alt+shift+F19")
+        );
+    }
+    #[test]
+    fn windows_transfer_keys_accept_held_modifiers_without_manufacturing_them() {
+        let local = uuid::Uuid::new_v4().to_string();
+        let peer = uuid::Uuid::new_v4().to_string();
+        let masks = [
+            "",
+            "control+",
+            "alt+",
+            "shift+",
+            "super+",
+            "control+alt+",
+            "control+shift+",
+            "control+super+",
+            "alt+shift+",
+            "alt+super+",
+            "shift+super+",
+            "control+alt+shift+",
+            "control+alt+super+",
+            "control+shift+super+",
+            "alt+shift+super+",
+            "control+alt+shift+super+",
+        ];
+        for mode in ["manual", "keep", "follow"] {
+            for role in ["host", "client"] {
+                for retained in [false, true] {
+                    let c = Config {
+                        role: role.into(),
+                        cross_screen_video: mode.into(),
+                        layout_side: "right".into(),
+                        ..Config::default()
+                    };
+                    let config =
+                        server_config_for_platform(&c, &local, &peer, retained, "win32").unwrap();
+                    let (host, client) = if role == "host" {
+                        (&local, &peer)
+                    } else {
+                        (&peer, &local)
+                    };
+                    for (key, target) in [("F18", host), ("F19", client)] {
+                        let variants: std::collections::BTreeSet<_> = config
+                            .lines()
+                            .filter(|line| line.contains(&format!("{key})")))
+                            .collect();
+                        assert_eq!(variants.len(), 16, "{role}/{mode}/{retained}/{key}");
+                        for mask in masks {
+                            let expected =
+                                format!("\tkeystroke({mask}{key}) = switchToScreen(sb-{target})");
+                            assert!(variants.contains(expected.as_str()), "Missing {expected}");
+                        }
+                    }
+                    // Recovery and user-visible shortcuts keep their contracts.
+                    assert!(config.contains(&format!(
+                        "keystroke(control+alt+Escape) = switchToScreen(sb-{host})"
+                    )));
+                    assert!(!config.contains("keystroke(Shift"));
+                }
+            }
+        }
+        for platform in ["darwin", "linux"] {
+            let (host, client) = transfer_shortcuts(platform);
+            assert_eq!(transfer_shortcut_variants(platform, host), vec![host]);
+            assert_eq!(transfer_shortcut_variants(platform, client), vec![client]);
+        }
     }
     #[test]
     fn windows_provider_observation_consumes_only_the_video_chord_and_preserves_transfer_rules() {

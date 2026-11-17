@@ -4,7 +4,62 @@ public static class WindowsScreenIdentityTests {
   private static void Check(bool condition, string message) {
     if(!condition) throw new System.Exception(message);
   }
+  private static void TransferHotkeys() {
+    foreach(bool host in new bool[] {false,true}) {
+      ushort expected=(ushort)(host ? 0x81 : 0x82);
+      // Replay successful transfers while either/both sides of each physical
+      // modifier are held. The transfer must leave that state untouched.
+      ushort[] modifiers={0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0x5b,0x5c};
+      for(int held=0;held<256;held++) {
+        var down=new System.Collections.Generic.HashSet<ushort>();
+        for(int bit=0;bit<modifiers.Length;bit++) if((held & (1<<bit))!=0) down.Add(modifiers[bit]);
+        var before=new System.Collections.Generic.HashSet<ushort>(down);
+        int sends=0;
+        ScreenBridgeNative.SendTransferHotkey(host,delegate(ScreenBridgeNative.Input[] inputs) {
+          sends++;
+          Check(inputs.Length==2,"Transfer must submit one key down/up batch");
+          for(int i=0;i<inputs.Length;i++) {
+            var key=inputs[i].union.keyboard;
+            Check(inputs[i].type==1 && key.vk==expected,"Transfer injected a modifier or unrelated key");
+            Check(key.flags==(i==0 ? 0u : 2u),"Unbalanced transfer key events");
+            Check(key.extra.ToUInt64()==0x44444354,"Missing internal transfer event tag");
+            if((key.flags & 2)==0) down.Add(key.vk); else down.Remove(key.vk);
+          }
+          return (uint)inputs.Length;
+        },delegate() {throw new System.Exception("Successful injection read last error");});
+        Check(sends==1 && before.SetEquals(down),"Transfer changed physically held keys");
+      }
+      foreach(uint accepted in new uint[] {0,1}) {
+        int calls=0;
+        bool failed=false;
+        try {
+          ScreenBridgeNative.SendTransferHotkey(host,delegate(ScreenBridgeNative.Input[] inputs) {
+            calls++;
+            if(calls==1) return accepted;
+            Check(accepted==1 && inputs.Length==1 && inputs[0].type==1 &&
+              inputs[0].union.keyboard.vk==expected && inputs[0].union.keyboard.flags==2,
+              "Partial injection cleanup touched a real modifier");
+            return 1;
+          },delegate() {return 5;});
+        } catch(System.ComponentModel.Win32Exception error) {
+          failed=error.NativeErrorCode==5 && error.Message.Contains("accepted="+accepted+"/2");
+        }
+        Check(failed,"Rejected/partial transfer did not preserve the original failure");
+        Check(calls==(accepted==1 ? 2 : 1),"Partial transfer cleanup was skipped or zero-send released a key");
+      }
+      bool originalError=false;
+      int cleanupCalls=0;
+      try {
+        ScreenBridgeNative.SendTransferHotkey(host,delegate(ScreenBridgeNative.Input[] inputs) {
+          if(cleanupCalls++==0) return 1;
+          throw new System.Exception("cleanup failure");
+        },delegate() {return 5;});
+      } catch(System.ComponentModel.Win32Exception error) {originalError=error.NativeErrorCode==5;}
+      Check(originalError && cleanupCalls==2,"Cleanup masked the original transfer failure");
+    }
+  }
   public static void Main() {
+    TransferHotkeys();
     Check(System.Runtime.InteropServices.Marshal.SizeOf(typeof(ScreenBridgeNative.Input))==(System.IntPtr.Size==8 ? 40 : 28), "Wake INPUT ABI size");
     var wake=ScreenBridgeNative.WakeInput();
     Check(wake.type==0 && wake.union.mouse.flags==1 && wake.union.mouse.x==0 && wake.union.mouse.y==0 && wake.union.mouse.data==0, "Wake event is not a zero-distance move only");
@@ -59,6 +114,6 @@ public static class WindowsScreenIdentityTests {
     try { ScreenBridgeNative.StableScreenId(new string[0]); }
     catch(System.Exception) { rejected = true; }
     Check(rejected, "Missing stable identity silently fell back to an unstable handle");
-    System.Console.WriteLine("Windows identity, signal sleep selection, single-output support, multi/clone rejection and zero-distance wake INPUT passed; no native calls");
+    System.Console.WriteLine("Windows transfer keys preserve 256 physical modifier states and handle partial injection; identity and signal output tests passed; no native calls");
   }
 }

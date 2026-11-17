@@ -8,16 +8,15 @@
 
 Deskflow DDC 面向两台电脑共用一块显示器的工作场景，内置 **Deskflow 1.27.0**，无需另行安装键鼠共享引擎。实体键鼠可以连接在任意一端，Mac、Windows 和 Ubuntu 按提供端、接收端配置，不绑定操作系统。
 
-**版本 0.3.1** · [下载安装包](https://github.com/Fantasy1316/deskflow-ddc/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Fantasy1316/deskflow-ddc/issues)
+**版本 0.3.2** · [下载安装包](https://github.com/Fantasy1316/deskflow-ddc/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Fantasy1316/deskflow-ddc/issues)
 
 这是独立项目，与 [Deskflow](https://github.com/deskflow/deskflow) 官方无隶属关系。应用使用 Rust、Tauri 2 和 Vue 3；英文文档不代表应用界面已提供英文翻译。
 
-## 0.3.1 更新
+## 0.3.2 更新
 
-- 新增 Intel Mac 的 IOKit/I²C DDC 后端，提供完整 x86_64 应用、Deskflow 引擎与原生依赖；Intel 支持仍为实验性，要求 macOS 14+，不启用断开输出兼容模式。
-- 显示器设置新增只读协议检测、接口参考值和本机已验证配置；macOS 可选择标准协议或部分 LG 使用的 `input-alt`，日常切换不会自动改协议。
-- 新增托盘文件发送面板：Mac 支持拖到菜单栏图标，Windows 可从托盘菜单打开；显示目录扫描与传输状态，并修复选择文件时面板提前关闭的问题。
-- 新增“关于我们”页面和手动检查正式版更新入口。完整共享的两端请同时升级到 0.3.1；Ubuntu 安装包继续标注 **Beta**。
+- 针对 Windows 提供端切到 Mac 后的 Shift 状态残留、按键异常和快捷键无法回切问题，内部转移仅发送专用 F18 / F19，避免模拟修饰键跨越电脑切换边界。
+- 兼容真实按住 Ctrl / Alt / Shift / Win 时的内部转移；部分注入失败时仅清理本次专用按键，并补充角色、跨屏策略及修饰键状态回归检查。
+- 完整共享的两端请同时升级到 0.3.2，沿用现有配置和配对；使用 Windows 安全桌面服务时需同步更新。Intel Mac 继续为实验性支持，Ubuntu 安装包继续标注 **Beta**。其他功能见[更新记录](CHANGELOG.md)。
 
 ## 功能
 
@@ -64,13 +63,13 @@ Apple Silicon 使用 m1ddc；Intel 使用内置 IOKit/I²C 后端，无需另装
 
 ## 安装与升级
 
-1. 从 [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases) 下载对应系统和架构的包，完整共享的两端均使用 **0.3.1**。
+1. 从 [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases) 下载对应系统和架构的包，完整共享的两端均使用 **0.3.2**。
 2. 更新前，先停止共享并退出两端旧应用和独立 Deskflow。应用不会接管其他程序启动的引擎。
 3. macOS 解压后将 `Deskflow DDC.app` 放到“应用程序”再打开，按提示授予辅助功能 / 输入监控权限。修改权限后可在应用内重新检测；主应用检测通过不代表内置引擎也已获授权。
 4. Windows 运行安装程序，或完整解压便携包后运行 `Deskflow DDC.exe`。保留随包 DLL 和 `resources`，允许应用通过所用网络的防火墙；未安装 WebView2 时需先安装运行时。
 5. 已启用 Windows 安全桌面控制的用户，升级后还需在共享设置中 **安装 / 更新后台服务**。
 
-0.3.1 沿用 0.2 系列的配置、设备身份、配对凭据和启动设置，无需删除配置。0.1 使用独立数据；可在 **设备与配对 → 导入旧版配置** 导入设备设置，导入后需重新配对并核对显示器映射。
+0.3.2 沿用 0.2 / 0.3 系列的配置、设备身份、配对凭据和启动设置，无需删除配置。0.1 使用独立数据；可在 **设备与配对 → 导入旧版配置** 导入设备设置，导入后需重新配对并核对显示器映射。
 
 项目当前不提供 Developer ID 公证或 Windows 发行签名，系统可能提示未知开发者；具体情况以对应 Release 为准，请仅使用可信来源的安装包。
 

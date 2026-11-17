@@ -8,16 +8,15 @@
 
 Deskflow DDC helps two computers share a monitor, keyboard and mouse. It bundles **Deskflow 1.27.0**, so no separate input-sharing engine installation is needed. Either computer can provide the physical keyboard and mouse; roles are independent of the operating system.
 
-**Version 0.3.1** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
+**Version 0.3.2** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
 
 This is an independent project, not affiliated with the [Deskflow](https://github.com/deskflow/deskflow) maintainers. The application uses Rust, Tauri 2 and Vue 3. The current application interface is in Chinese; this README provides English usage instructions.
 
-## What's new in 0.3.1
+## What's new in 0.3.2
 
-- Added an Intel Mac IOKit/I2C DDC backend and a complete x86_64 app, Deskflow engine and native dependencies. Intel support remains experimental, requires macOS 14+, and does not enable the output-disconnection fallback.
-- Added read-only protocol detection, protocol-specific input presets and locally verified monitor profiles. macOS supports the standard protocol and `input-alt` used by some LG models; ordinary switching never changes protocols automatically.
-- Added a tray file-send panel with directory-scanning and transfer status. Mac accepts files dropped onto the menu-bar icon; Windows opens the panel from its tray menu. Opening a file picker no longer closes the panel prematurely.
-- Added About and a manual stable-release update check. Upgrade both endpoints to 0.3.1 for full sharing. Ubuntu packages remain **Beta**.
+- Addresses stuck Shift state, incorrect keys and a failed return shortcut after switching from a Windows provider to Mac. Internal transfers now send only reserved F18 / F19 keys, avoiding synthetic modifiers across a computer switch.
+- Internal transfers accept every combination of physically held Ctrl / Alt / Shift / Win. Partial injection cleanup releases only the reserved key, with regression coverage for roles, crossing policies and modifier states.
+- Upgrade both endpoints to 0.3.2; existing settings and pairing are retained. Update the Windows secure-desktop service if used. Intel Mac support remains experimental and Ubuntu packages remain **Beta**. See the [changelog](CHANGELOG.md) for earlier features.
 
 ## Features
 
@@ -64,13 +63,13 @@ If DDC cannot be used, try the experimental compatibility mode below. Monitors w
 
 ## Installation and upgrades
 
-1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.1 on both computers** for full sharing.
+1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.2 on both computers** for full sharing.
 2. Before upgrading, stop sharing and quit the old applications and any independent Deskflow instances on both computers. This application does not take over engines started by another application.
 3. On macOS, extract and move `Deskflow DDC.app` to Applications, then open it and grant the requested Accessibility/Input Monitoring permissions. Permissions can be checked again from the application. Permission for the main application does not necessarily grant permission to the bundled engine.
 4. On Windows, run the installer, or fully extract the portable package and open `Deskflow DDC.exe`. Keep its DLLs and `resources` directory together. Allow application network access through the firewall; install WebView2 Runtime if it is missing.
 5. If Windows secure-desktop control is enabled, **install/update the background service** from Sharing Settings after upgrading.
 
-Version 0.3.1 retains the 0.2-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
+Version 0.3.2 retains the 0.2 / 0.3-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
 
 The project currently does not provide Developer ID notarization or Windows publisher signing. Your OS may show an unknown-developer warning. Check the individual release and use packages from a trusted source.
 

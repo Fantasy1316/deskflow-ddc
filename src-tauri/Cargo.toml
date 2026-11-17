@@ -1,6 +1,6 @@
 [package]
 name = "deskflow-ddc-tauri"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 default-run = "deskflow-ddc"
 rust-version = "1.90"

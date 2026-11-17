@@ -169,12 +169,32 @@ public static class ScreenBridgeNative {
     }
     finally { if(previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous); }
   }
+  public static Input[] TransferHotkeyInputs(bool host) {
+    // F18/F19 are private transfer triggers, bound for every modifier state.
+    // Never manufacture Ctrl/Alt/Shift/Win events: they can cross the engine's
+    // switch boundary or release a modifier physically held by the user.
+    ushort key=(ushort)(host ? 0x81 : 0x82);
+    return new Input[] {
+      new Input {type=1,union=new InputUnion {keyboard=new Keyboard {vk=key,extra=new UIntPtr(0x44444354)}}},
+      new Input {type=1,union=new InputUnion {keyboard=new Keyboard {vk=key,flags=2,extra=new UIntPtr(0x44444354)}}}
+    };
+  }
+  public static void SendTransferHotkey(bool host, Func<Input[],uint> send, Func<int> lastError) {
+    var inputs=TransferHotkeyInputs(host);
+    uint accepted=send(inputs);
+    if(accepted==inputs.Length) return;
+    int error=lastError();
+    // If only our key-down was inserted, release that same reserved key.
+    // Do not touch any real modifier, and do not release keys on a zero send.
+    if(accepted==1) {
+      try {send(new Input[] {inputs[1]});} catch(Exception) {}
+    }
+    throw new Win32Exception(error,"Internal transfer key rejected; accepted="+accepted+"/"+inputs.Length+"; error="+error);
+  }
   public static void Hotkey(bool host) {
-    ushort[] keys = {0x11, 0x12, 0x10, (ushort)(host ? 0x81 : 0x82)}; // Ctrl Alt Shift F18/F19
-    var inputs = new List<Input>();
-    foreach(var key in keys) inputs.Add(new Input { type=1, union=new InputUnion { keyboard=new Keyboard { vk=key } } });
-    for(int i=keys.Length-1;i>=0;i--) inputs.Add(new Input { type=1, union=new InputUnion { keyboard=new Keyboard { vk=keys[i], flags=2 } } });
-    if(SendInput((uint)inputs.Count, inputs.ToArray(), Marshal.SizeOf(typeof(Input))) != inputs.Count) throw new Win32Exception(Marshal.GetLastWin32Error());
+    SendTransferHotkey(host,
+      delegate(Input[] inputs) {return SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));},
+      delegate() {return Marshal.GetLastWin32Error();});
   }
   public static List<Item> Monitors(string selected, int? value) {
     var result = new List<Item>(); Exception failure=null; bool matched=false;
