@@ -1,3 +1,4 @@
+import { prepareMacCore } from './prepare-engine-macos.mjs'
 import { prepareLinux } from './prepare-engine-linux.mjs'
 import { downloadVerified } from './download-verified.mjs'
 import { macArchitecture, verifyMacArchitecture } from './macos-architecture.mjs'
@@ -69,33 +70,25 @@ if (platform === 'linux') {
   process.exit(0)
 }
 const asset = assets[platform === 'darwin' ? `darwin-${arch}` : platform]
-const archive = download(
-  asset.name,
-  `https://github.com/deskflow/deskflow/releases/download/v${version}/${asset.name}`,
-  asset.sha256,
-)
+const archive =
+  platform === 'darwin'
+    ? null
+    : download(
+        asset.name,
+        `https://github.com/deskflow/deskflow/releases/download/v${version}/${asset.name}`,
+        asset.sha256,
+      )
 const staging = mkdtempSync(join(tmpdir(), 'ddc-engine-'))
 const target = join(destination, 'deskflow')
-let mounted = false
 try {
   mkdirSync(join(staging, 'content'))
+  rmSync(target, { recursive: true, force: true })
+  mkdirSync(target)
+  let patched = null
   if (platform === 'darwin') {
     if (process.platform !== 'darwin')
-      throw new Error('macOS engine preparation requires macOS to mount the verified DMG')
-    execFileSync(
-      'hdiutil',
-      ['attach', archive, '-readonly', '-nobrowse', '-mountpoint', join(staging, 'content')],
-      { input: 'Y\n', stdio: ['pipe', 'pipe', 'pipe'] },
-    )
-    mounted = true
-    const app = readdirSync(join(staging, 'content')).find((name) => name.endsWith('.app'))
-    if (!app) throw new Error('Official DMG contains no application')
-    rmSync(target, { recursive: true, force: true })
-    mkdirSync(target)
-    cpSync(join(staging, 'content', app), join(target, 'Deskflow.app'), {
-      recursive: true,
-      verbatimSymlinks: true,
-    })
+      throw new Error('macOS engine preparation requires a macOS build host')
+    patched = prepareMacCore({ root, cache, source, sourceRevision, target, arch })
     const nativeFiles = verifyMacArchitecture(join(target, 'Deskflow.app'), arch)
     console.log(`Verified ${nativeFiles} native engine files for macOS/${arch}`)
   } else {
@@ -120,8 +113,6 @@ try {
         { stdio: 'inherit', windowsHide: true },
       )
     } else execFileSync('unzip', ['-q', archive, '-d', join(staging, 'content')])
-    rmSync(target, { recursive: true, force: true })
-    mkdirSync(target)
     cpSync(join(staging, 'content'), join(target, 'runtime'), { recursive: true })
   }
   function findBinary(directory, prefix = '') {
@@ -169,7 +160,14 @@ try {
         archiveSha256,
         sourceRevision,
         sourceSha256: digest(source),
-        upstreamArchiveSha256: asset.sha256,
+        upstreamArchiveSha256: platform === 'darwin' ? digest(source) : asset.sha256,
+        ...(patched
+          ? {
+              patchSha256: patched.patchSha256,
+              qtVersion: patched.qtVersion,
+              opensslVersion: patched.opensslVersion,
+            }
+          : {}),
       },
       null,
       2,
@@ -200,6 +198,5 @@ try {
   cpSync(join(root, 'LICENSE'), join(destination, 'LICENSE'))
   console.log(`Prepared verified Deskflow ${version} for ${platform}/${arch}: ${target}`)
 } finally {
-  if (mounted) execFileSync('hdiutil', ['detach', join(staging, 'content')], { stdio: 'inherit' })
   rmSync(staging, { recursive: true, force: true })
 }

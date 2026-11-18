@@ -60,8 +60,13 @@ jobs:
         id: engine-cache
         with:
           path: .engine-cache
-          key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/prepare-windows-bundler.mjs', 'scripts/download-verified.mjs') }}
+          key: engine-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('scripts/prepare-engine*.mjs', 'scripts/patch-engine.mjs', 'resources/vendor/deskflow/**', 'scripts/prepare-windows-bundler.mjs', 'scripts/download-verified.mjs') }}
       - run: node --test scripts/download-verified.test.mjs scripts/macos-architecture.test.mjs
+      - if: runner.os == 'macOS'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          cache: true
       - run: pnpm prepare:engine
       - if: runner.os == 'Windows'
         run: node scripts/prepare-windows-bundler.mjs

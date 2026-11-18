@@ -13,6 +13,7 @@ pub mod pointer;
 pub mod protocol;
 pub mod startup;
 pub mod store;
+mod system_events;
 
 pub mod runtime;
 pub mod session;

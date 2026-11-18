@@ -153,6 +153,32 @@ fn shortcut_marker(line: &str) -> Option<&str> {
     uuid::Uuid::parse_str(host).ok()?;
     Some(host)
 }
+pub(crate) fn is_input_entry(line: &str) -> bool {
+    line.split_once("INFO: ")
+        .is_some_and(|(_, message)| message.trim() == "entering computer")
+}
+pub(crate) fn is_transport_diagnostic(line: &str) -> bool {
+    line.split_once("INFO: ").is_some_and(|(_, message)| {
+        matches!(
+            message.trim(),
+            "ddc transport heartbeat received"
+                | "ddc transport heartbeat queued"
+                | "ddc primary entry mapped"
+        )
+    })
+}
+pub(crate) fn is_socket_failure(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "eof violates tls protocol",
+        "connection reset by peer",
+        "broken pipe",
+        "connection was reset",
+        "socket is not connected",
+    ]
+    .iter()
+    .any(|message| lower.contains(message))
+}
 fn output_event(line: String, native_shortcut: bool) -> Option<Event> {
     if native_shortcut {
         if let Some(host) = shortcut_marker(&line) {
@@ -427,6 +453,17 @@ impl Engine {
             .kill_on_drop(true);
         if cfg!(unix) {
             command.env("TMPDIR", format!("{}/", temp.display()));
+        }
+        if cfg!(target_os = "macos") && c.role == "host" {
+            // Recreated for every launch; never consume a previous session's route.
+            atomic_write(
+                &dir.join("deskflow/primary-route.json"),
+                br#"{"schema":1,"enabled":false}"#,
+            )?;
+            command.env(
+                "DESKFLOW_DDC_PRIMARY_ROUTE",
+                dir.join("deskflow/primary-route.json"),
+            );
         }
         command
             .env("XDG_CONFIG_HOME", dir.join("isolated-config"))
@@ -987,6 +1024,42 @@ mod tests {
             output_event("INFO: connected".into(), true),
             Some(Event::Output(_))
         ));
+    }
+    #[test]
+    fn input_transport_metadata_is_allowlisted_without_key_mouse_or_clipboard_data() {
+        for message in [
+            "entering computer",
+            "ddc transport heartbeat received",
+            "ddc transport heartbeat queued",
+            "ddc primary entry mapped",
+        ] {
+            let line = format!("[2026-11-18T15:11:17.804] INFO: {message}");
+            assert!(matches!(
+                output_event(line.clone(), false),
+                Some(Event::Output(_))
+            ));
+            assert_eq!(is_input_entry(&line), message == "entering computer");
+            assert_eq!(
+                is_transport_diagnostic(&line),
+                message != "entering computer"
+            );
+        }
+        for line in [
+            "VERBOSE: onKeyDown",
+            "DEBUG: mouseMove 40,50",
+            "INFO: clipboard data",
+            "VERBOSE: ddc transport heartbeat queued",
+            "INFO: ddc transport heartbeat queued key=A",
+        ] {
+            assert!(!is_transport_diagnostic(line));
+            assert!(!is_input_entry(line));
+            if !line.starts_with("INFO: ddc") {
+                assert!(output_event(line.into(), false).is_none());
+            }
+        }
+        assert!(is_socket_failure("NOTE: EOF violates TLS protocol"));
+        assert!(is_socket_failure("connection reset by peer"));
+        assert!(!is_socket_failure("INFO: connected to server"));
     }
     #[test]
     fn modifier_mapping_is_host_owned_and_only_changes_cross_system_receiver() {

@@ -19,6 +19,8 @@ struct Manifest {
     sha256: String,
     archive_sha256: String,
     upstream_archive_sha256: String,
+    #[serde(default)]
+    patch_sha256: Option<String>,
 }
 fn digest(path: &Path) -> Result<String> {
     let mut f = File::open(path)?;
@@ -89,12 +91,24 @@ pub fn install(resources: &Path, data: &Path) -> Result<PathBuf> {
         relative(binary) && manifest.binary.len() <= 1024,
         "内置引擎路径无效"
     );
-    // The upstream digest keeps the engine path stable across app-only updates,
-    // even if the local tar archive's timestamps change during packaging.
+    // Official binaries retain their stable upstream cache. Source-built cores
+    // also need the actual binary digest: compiler/CPU changes can produce a
+    // different binary from the same source recipe and must not reuse it.
+    if let Some(patch) = &manifest.patch_sha256 {
+        ensure!(
+            crate::model::valid_fingerprint(patch),
+            "内置引擎补丁校验值无效"
+        );
+    }
     let destination = data.join("engine").join(format!(
-        "{}-{}",
+        "{}-{}{}",
         manifest.version,
-        &manifest.upstream_archive_sha256[..16]
+        &manifest.upstream_archive_sha256[..16],
+        manifest
+            .patch_sha256
+            .as_ref()
+            .map(|p| format!("-{}-{}-{}", manifest.arch, &p[..16], &manifest.sha256[..16]))
+            .unwrap_or_default()
     ));
     if !destination.exists() {
         let archive = root.join("runtime.tar.gz");
@@ -193,6 +207,29 @@ mod tests {
         fs::write(resources.join("deskflow/runtime.tar.gz"), b"bad").unwrap();
         assert!(install(&resources, &dir.path().join("profile")).is_err());
         assert!(!dir.path().join("profile/engine").exists());
+    }
+    #[test]
+    fn patched_builds_use_a_separate_cache_and_never_reuse_another_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let resources = fixture(dir.path());
+        let manifest_path = resources.join("deskflow/manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let data = dir.path().join("profile");
+        let official = install(&resources, &data).unwrap();
+        manifest["patchSha256"] = serde_json::json!("b".repeat(64));
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let patched = install(&resources, &data).unwrap();
+        assert_ne!(official, patched);
+        // The same recipe compiled by another toolchain must extract a new
+        // artifact, not select the prior binary and report it as corrupted.
+        manifest["sha256"] = serde_json::json!("c".repeat(64));
+        manifest["archiveSha256"] = serde_json::json!("d".repeat(64));
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let error = install(&resources, &data).unwrap_err().to_string();
+        assert!(error.contains("压缩包校验失败"), "{error}");
+        assert_eq!(fs::read(official).unwrap(), b"test executable");
+        assert_eq!(fs::read(patched).unwrap(), b"test executable");
     }
     #[test]
     fn paths_and_links_stay_inside_extraction_root() {

@@ -147,6 +147,7 @@ impl Runtime {
     }
 
     pub fn ensure_switch_available_at(&self, received: Instant) -> Result<()> {
+        self.ensure_system_awake()?;
         ensure!(
             !self.switch_protection.blocks(received),
             "正在切换或等待显示器稳定，请稍后重试"
@@ -181,6 +182,7 @@ impl Runtime {
                 || interrupted.is_cancelled()
                 || cancelled.is_cancelled()
                 || self.shutdown.is_cancelled()
+                || !self.system_events.ready()
                 || self.epoch.load(Ordering::Acquire) != epoch
                 || link.is_some_and(|link| !self.current(link))
             {
@@ -244,6 +246,7 @@ impl Runtime {
             result = tokio::time::timeout_at(deadline, observed) => result.unwrap_or(false),
         };
         if self.epoch.load(Ordering::Acquire) != epoch
+            || !self.system_events.ready()
             || link.is_some_and(|link| !self.current(link))
         {
             return false;

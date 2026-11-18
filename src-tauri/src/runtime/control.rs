@@ -23,9 +23,210 @@ async fn wait_topology(mut ready: watch::Receiver<bool>, cancelled: &Cancellatio
     }
 }
 
+async fn wait_retry(
+    checks: &mut watch::Receiver<u64>,
+    topology: &mut watch::Receiver<bool>,
+    cancelled: &CancellationToken,
+    delay: Duration,
+) -> Option<&'static str> {
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => None,
+        result = checks.changed() => result.ok().map(|_| "recovery"),
+        result = topology.changed() => result.ok().map(|_| "topology"),
+        _ = tokio::time::sleep(delay) => Some("timer"),
+    }
+}
+
+async fn wait_connection_unavailable(
+    mut events: watch::Receiver<crate::system_events::State>,
+    mut topology: watch::Receiver<bool>,
+    power: u64,
+) {
+    loop {
+        let state = events.borrow_and_update().clone();
+        if state.sleeping || state.power != power || !*topology.borrow_and_update() {
+            return;
+        }
+        tokio::select! {
+            result = events.changed() => { if result.is_err() { return; } },
+            result = topology.changed() => { if result.is_err() { return; } },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn retry_wait_is_interrupted_by_recovery_or_topology_without_losing_early_events() {
+        let events = crate::system_events::Events::default();
+        let mut checks = events.connection_checks();
+        let (ready, mut topology) = watch::channel(true);
+        let cancelled = CancellationToken::new();
+        let delay = Duration::from_secs(60);
+        {
+            let waiting = wait_retry(&mut checks, &mut topology, &cancelled, delay);
+            tokio::pin!(waiting);
+            assert!(futures_util::poll!(&mut waiting).is_pending());
+            events.emit(crate::system_events::Event::ScreenWake);
+            assert_eq!(waiting.await, Some("recovery"));
+        }
+        events.request_connection_check(); // Arrived during a previous connect.
+        assert_eq!(
+            wait_retry(&mut checks, &mut topology, &cancelled, delay).await,
+            Some("recovery")
+        );
+        ready.send_replace(false);
+        assert_eq!(
+            wait_retry(&mut checks, &mut topology, &cancelled, delay).await,
+            Some("topology")
+        );
+        ready.send_replace(true);
+        assert_eq!(
+            wait_retry(&mut checks, &mut topology, &cancelled, delay).await,
+            Some("topology")
+        );
+        events.request_connection_check();
+        cancelled.cancel();
+        assert_eq!(
+            wait_retry(&mut checks, &mut topology, &cancelled, delay).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn screen_wake_checks_live_session_without_tearing_it_down_in_both_roles_and_modes() {
+        for role in ["host", "client"] {
+            for method in [DisplayMethod::Ddc, DisplayMethod::Signal] {
+                let dir = tempfile::tempdir().unwrap();
+                let rt = super::super::pointer_bridge::tests::fixture(dir.path(), role);
+                rt.inner.lock().await.state.config.display_method = method;
+                let before = rt.snapshot().await;
+                let (remote, mut incoming) =
+                    super::super::pointer_bridge::tests::attach_with_requests(&rt).await;
+                let link = rt.link.lock().await.clone().unwrap();
+                let cloned = rt.clone();
+                let current = link.clone();
+                let task = tokio::spawn(async move { cloned.maintain_connection(&current).await });
+                // Answer the initial heartbeat; the next timer tick is 1s away.
+                let Some(Incoming::Request { id, method, .. }) = incoming.recv().await else {
+                    panic!("missing ping")
+                };
+                assert_eq!(method, "ping");
+                remote.reply(id, Ok(json!(true))).await.unwrap();
+                rt.system_events
+                    .emit(crate::system_events::Event::ScreenWake);
+                let next = tokio::time::timeout(Duration::from_millis(500), incoming.recv())
+                    .await
+                    .unwrap();
+                let Some(Incoming::Request { id, method, .. }) = next else {
+                    panic!("missing immediate ping")
+                };
+                assert_eq!(method, "ping");
+                remote.reply(id, Ok(json!(true))).await.unwrap();
+                assert!(rt.current(&link));
+                assert!(!link.session.closed.is_cancelled());
+                let after = rt.snapshot().await;
+                assert_eq!(after.display_device_id, before.display_device_id);
+                assert_eq!(after.active_device_id, before.active_device_id);
+                assert!(rt.display_recovery.lock().await.pending().is_none());
+                remote.close();
+                assert!(tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_discovery_releases_busy_state_and_preserves_previous_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = super::super::pointer_bridge::tests::fixture(dir.path(), "client");
+        let device = discovery::Device {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Provider".into(),
+            hostname: "provider.local".into(),
+            addresses: vec![],
+            port: 45990,
+        };
+        rt.inner
+            .lock()
+            .await
+            .state
+            .discovered_devices
+            .push(device.clone());
+        // Hold the lock so this test needs no actual mDNS network access.
+        let _lock = rt.discovery.lock().await;
+        assert!(rt.discover_until(async {}).await.unwrap());
+        let after = rt.snapshot().await;
+        assert!(!after.discovering);
+        assert_eq!(after.discovered_devices[0].id, device.id);
+    }
+
+    #[tokio::test]
+    async fn client_connects_to_verified_address_before_starting_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = super::super::pointer_bridge::tests::fixture(dir.path(), "client");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        {
+            let mut i = rt.inner.lock().await;
+            i.state.config.peer_address = "not-ready.local".into();
+            i.state.config.control_port = address.port();
+            i.store.value.trusted_peer = Some(crate::model::Pin {
+                id: uuid::Uuid::new_v4(),
+                fingerprint: "a".repeat(64),
+            });
+            i.store.value.last_verified_address = Some(address.ip());
+        }
+        let cancelled = CancellationToken::new();
+        let running = rt.clone();
+        let token = cancelled.clone();
+        let task = tokio::spawn(async move { running.client_loop(1, token).await });
+        let (socket, _) = tokio::time::timeout(Duration::from_millis(500), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rt.snapshot().await.discovering);
+        cancelled.cancel();
+        drop(socket);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sleep_interrupts_pending_handshake_but_screen_wake_does_not() {
+        for host in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = super::super::pointer_bridge::tests::fixture(
+                dir.path(),
+                if host { "host" } else { "client" },
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let socket = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (_remote, _) = listener.accept().await.unwrap();
+            let cancel = CancellationToken::new();
+            let attempt = rt.run_socket(socket, 1, 1, host, "test", cancel);
+            tokio::pin!(attempt);
+            assert!(futures_util::poll!(&mut attempt).is_pending());
+            rt.system_events
+                .emit(crate::system_events::Event::ScreenWake);
+            assert!(futures_util::poll!(&mut attempt).is_pending());
+            rt.system_events.emit(crate::system_events::Event::Sleep);
+            assert!(tokio::time::timeout(Duration::from_millis(500), attempt)
+                .await
+                .unwrap()
+                .is_err());
+            assert!(rt.link.lock().await.is_none());
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
@@ -211,84 +412,168 @@ impl Runtime {
         }
     }
     pub(super) async fn client_loop(self: Arc<Self>, epoch: u64, cancel: CancellationToken) {
+        // Subscribe before attempting anything: a wake/topology recovery during
+        // connect/handshake must not be lost when we later enter backoff.
+        let mut checks = self.system_events.connection_checks();
+        let mut topology = self.topology_ready.subscribe();
+        let mut next_discovery = tokio::time::Instant::now();
         while !cancel.is_cancelled() && self.epoch.load(Ordering::Acquire) == epoch {
-            if !wait_topology(self.topology_ready.subscribe(), &cancel).await {
+            if !wait_topology(topology.clone(), &cancel).await {
                 break;
             }
-            if let Err(e) = self.discover().await {
-                self.trace("discovery.unavailable", json!({"error":e.to_string()}))
-                    .await;
+            if checks.has_changed().unwrap_or(false) {
+                next_discovery = tokio::time::Instant::now();
             }
-            let (c, pin, cache) = {
+            checks.borrow_and_update();
+            topology.borrow_and_update();
+            let (c, pin, cache, discovered) = {
                 let i = self.inner.lock().await;
                 (
                     i.state.config.clone(),
                     i.store.value.trusted_peer.clone(),
                     i.store.value.last_verified_address,
+                    i.state.discovered_devices.clone(),
                 )
             };
-            let discovered = self.snapshot().await.discovered_devices;
-            match discovery::candidates(&c, pin.as_ref(), cache, &discovered).await {
-                Ok(candidates) => {
-                    for candidate in candidates {
-                        if cancel.is_cancelled() || self.epoch.load(Ordering::Acquire) != epoch {
-                            return;
-                        }
-                        let result = tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            result = discovery::connect(&candidate) => result,
-                        };
-                        match result {
-                            Ok(socket) => {
-                                let id = self.session_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-                                self.active_session.store(id, Ordering::Release);
-                                let result = self
-                                    .run_socket(
-                                        socket,
-                                        epoch,
-                                        id,
-                                        false,
-                                        candidate.source,
-                                        cancel.clone(),
-                                    )
-                                    .await;
-                                let verified = self.snapshot().await.connected;
-                                if let Err(e) = result {
-                                    self.log(
-                                        "error",
-                                        &format!(
-                                            "连接 {}（{}）结束：{e}",
-                                            candidate.address, candidate.source,
-                                        ),
-                                    )
-                                    .await;
-                                }
-                                self.cleanup_session(epoch, id).await;
-                                if verified {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                self.trace(
-                                    "address.failed",
-                                    json!({
-                                        "address": candidate.address.to_string(),
-                                        "source": candidate.source,
-                                        "error": e.to_string(),
-                                    }),
-                                )
-                                .await
-                            }
-                        }
+            let candidates = discovery::immediate_candidates(&c, pin.as_ref(), cache, &discovered);
+            let quick_retry = !candidates.is_empty();
+            let mut attempted = vec![];
+            let ended = self
+                .try_candidates(candidates, &mut attempted, epoch, &cancel)
+                .await;
+            // A verified address normally reconnects before any mDNS/DNS wait.
+            // Refresh discovery after failures, but not on every fast retry.
+            if !ended
+                && !cancel.is_cancelled()
+                && self.epoch.load(Ordering::Acquire) == epoch
+                && self.system_events.ready()
+                && *self.topology_ready.borrow()
+                && tokio::time::Instant::now() >= next_discovery
+            {
+                let interrupt = async {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {},
+                        _ = checks.changed() => {},
+                        _ = topology.changed() => {},
+                    }
+                };
+                match self.discover_until(interrupt).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.trace("discovery.unavailable", json!({"error":e.to_string()}))
+                            .await
                     }
                 }
-                Err(e) => self.log("error", &e.to_string()).await,
+                next_discovery = tokio::time::Instant::now() + Duration::from_secs(5);
+                let discovered = self.snapshot().await.discovered_devices;
+                let candidates = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    _ = checks.changed() => continue,
+                    _ = topology.changed() => continue,
+                    candidates = discovery::candidates(&c, pin.as_ref(), cache, &discovered) => candidates,
+                };
+                match candidates {
+                    Ok(candidates) => {
+                        self.try_candidates(candidates, &mut attempted, epoch, &cancel)
+                            .await;
+                    }
+                    Err(e) => self.log("error", &e.to_string()).await,
+                }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            let known = {
+                let i = self.inner.lock().await;
+                quick_retry
+                    || !discovery::immediate_candidates(
+                        &i.state.config,
+                        i.store.value.trusted_peer.as_ref(),
+                        i.store.value.last_verified_address,
+                        &i.state.discovered_devices,
+                    )
+                    .is_empty()
+            };
+            let delay = Duration::from_secs(if known { 1 } else { 5 });
+            let waiting = std::time::Instant::now();
+            let Some(cause) = wait_retry(&mut checks, &mut topology, &cancel, delay).await else {
+                break;
+            };
+            self.trace(
+                "connection.retry",
+                json!({"cause":cause,
+                "waitedMs":waiting.elapsed().as_millis()}),
+            )
+            .await;
+        }
+    }
+
+    async fn try_candidates(
+        self: &Arc<Self>,
+        candidates: Vec<discovery::Candidate>,
+        attempted: &mut Vec<std::net::SocketAddr>,
+        epoch: u64,
+        cancel: &CancellationToken,
+    ) -> bool {
+        for candidate in candidates {
+            if cancel.is_cancelled()
+                || self.epoch.load(Ordering::Acquire) != epoch
+                || !self.system_events.ready()
+                || !*self.topology_ready.borrow()
+            {
+                return false;
+            }
+            if attempted.contains(&candidate.address) {
+                continue;
+            }
+            attempted.push(candidate.address);
+            self.trace(
+                "connection.attempt",
+                json!({"address":candidate.address.to_string(),
+                "source":candidate.source}),
+            )
+            .await;
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return false,
+                _ = wait_connection_unavailable(self.system_events.subscribe(), self.topology_ready.subscribe(), self.system_events.state().power) => return false,
+                result = discovery::connect(&candidate) => result,
+            };
+            match result {
+                Ok(socket) => {
+                    let id = self.session_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                    self.active_session.store(id, Ordering::Release);
+                    let result = self
+                        .run_socket(socket, epoch, id, false, candidate.source, cancel.clone())
+                        .await;
+                    let verified = self.snapshot().await.connected;
+                    if let Err(e) = result {
+                        self.log(
+                            "error",
+                            &format!(
+                                "连接 {}（{}）结束：{e}",
+                                candidate.address, candidate.source
+                            ),
+                        )
+                        .await;
+                    }
+                    self.cleanup_session(epoch, id).await;
+                    if verified {
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    self.trace(
+                        "address.failed",
+                        json!({
+                            "address":candidate.address.to_string(), "source":candidate.source,
+                            "error":e.to_string(),
+                        }),
+                    )
+                    .await
+                }
             }
         }
+        false
     }
     pub(super) async fn run_socket(
         self: &Arc<Self>,
@@ -300,7 +585,7 @@ impl Runtime {
         cancel: CancellationToken,
     ) -> Result<()> {
         ensure!(
-            *self.topology_ready.borrow(),
+            *self.topology_ready.borrow() && self.system_events.ready(),
             "独立屏幕暂不可用，等待恢复后自动重连"
         );
         let address = socket.peer_addr()?.ip();
@@ -309,12 +594,18 @@ impl Runtime {
             protocol::pairing_key(&i.store.pairing)?
         };
         let wire = tokio::select! {
+            biased;
             _ = cancel.cancelled() => bail!("共享已停止"),
+            _ = wait_connection_unavailable(self.system_events.subscribe(), self.topology_ready.subscribe(), self.system_events.state().power) => bail!("显示连接正在恢复，重新尝试配对"),
             result = tokio::time::timeout(
                 Duration::from_secs(8), Wire::handshake(socket, key, host),
             ) => result.context("配对超时")??,
         };
         ensure!(self.epoch.load(Ordering::Acquire) == epoch, "共享已停止");
+        ensure!(
+            self.system_events.ready() && *self.topology_ready.borrow(),
+            "显示连接正在恢复，重新尝试配对"
+        );
         let (session, mut incoming) = Session::spawn(wire);
         let link = Arc::new(Link {
             address,
@@ -322,6 +613,8 @@ impl Runtime {
             epoch,
             session: session.clone(),
             peer: watch::channel(None).0,
+            input_generation: AtomicU64::new(0),
+            input_entries: AtomicU64::new(0),
         });
         {
             let mut slot = self.link.lock().await;
@@ -456,18 +749,31 @@ impl Runtime {
             }
         }
         self.start_engine(link, &peer, address).await?;
+        self.maintain_connection(link).await
+    }
+
+    async fn maintain_connection(&self, link: &Link) -> Result<()> {
+        let mut checks = self.system_events.connection_checks();
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _=link.session.closed.cancelled()=>bail!("对端连接已断开"),
-                _ = heartbeat.tick() => {
-                    let ping = std::time::Instant::now();
-                    let result = link.session.request("ping", Value::Null, Duration::from_secs(5)).await;
-                    self.transfers.observe_control_latency(ping.elapsed());
-                    result?;
+                result = checks.changed() => {
+                    if result.is_err() { bail!("连接检查通道已关闭"); }
+                    self.trace("connection.check", json!({"cause":"recovery"})).await;
                 }
+                _ = heartbeat.tick() => {}
             }
+            // A screen wake checks the existing encrypted session. Only a real
+            // RPC failure ends it; waking our own signal output is harmless.
+            let ping = std::time::Instant::now();
+            let result = link
+                .session
+                .request("ping", Value::Null, Duration::from_secs(5))
+                .await;
+            self.transfers.observe_control_latency(ping.elapsed());
+            result?;
         }
     }
     pub(super) fn session_matches(&self, epoch: u64, id: u64) -> bool {

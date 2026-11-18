@@ -11,6 +11,8 @@ use tokio::{
 pub struct Platform {
     pub resources: PathBuf,
     windows: Mutex<Option<WindowsHelper>>,
+    #[cfg(all(test, target_os = "macos"))]
+    return_samples: std::sync::Mutex<std::collections::VecDeque<Option<crate::pointer::Point>>>,
 }
 struct WindowsHelper {
     child: Child,
@@ -23,6 +25,10 @@ impl Platform {
         Self {
             resources,
             windows: Mutex::new(None),
+            // Tests never read or move the user's real cursor. Entry tests
+            // supply deterministic samples and helper fixtures record writes.
+            #[cfg(all(test, target_os = "macos"))]
+            return_samples: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
     }
     pub async fn run(&self, file: PathBuf, args: &[String]) -> Result<String> {
@@ -374,6 +380,48 @@ impl Platform {
             .await?;
         }
         Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn return_cursor(
+        &self,
+        native_entry: bool,
+    ) -> Result<Option<crate::pointer::Point>> {
+        #[cfg(not(test))]
+        {
+            if native_entry {
+                crate::pointer::mac::visible_cursor()
+            } else {
+                // The serialized poll has already established local ownership.
+                // Do not depend on legacy cursor visibility for recovery (or
+                // when another local application deliberately hides a cursor).
+                crate::pointer::cursor().map(Some)
+            }
+        }
+        #[cfg(test)]
+        {
+            let _ = native_entry;
+            let mut samples = self.return_samples.lock().unwrap();
+            Ok(if samples.len() > 1 {
+                samples.pop_front().flatten()
+            } else {
+                samples.front().copied().flatten()
+            })
+        }
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn test_return_samples(&self, samples: Vec<Option<crate::pointer::Point>>) {
+        *self.return_samples.lock().unwrap() = samples.into();
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn return_point(&self, point: crate::pointer::Point) -> Result<()> {
+        #[cfg(not(test))]
+        {
+            crate::pointer::mac::point(point)
+        }
+        #[cfg(test)]
+        {
+            self.point(point.x, point.y).await
+        }
     }
     pub async fn screens(&self) -> Result<Value> {
         if platform() == "win32" {

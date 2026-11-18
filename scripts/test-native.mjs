@@ -8,6 +8,22 @@ if (
 )
   throw new Error('Windows bridge contains non-ASCII text but is missing a UTF-8 BOM.')
 mkdirSync('.native-cache', { recursive: true })
+if (process.platform === 'darwin')
+  execFileSync(process.execPath, ['--test', 'scripts/engine-patch.test.mjs'], { stdio: 'inherit' })
+execFileSync(
+  'clang++',
+  [
+    '-std=c++20',
+    '-Wall',
+    '-Wextra',
+    '-Werror',
+    'native/tests/primary-entry.cpp',
+    '-o',
+    '.native-cache/test-primary-entry',
+  ],
+  { stdio: 'inherit' },
+)
+execFileSync('.native-cache/test-primary-entry', [], { stdio: 'inherit' })
 execFileSync(
   'clang',
   [
@@ -38,6 +54,25 @@ execFileSync(
 )
 execFileSync('.native-cache/test-intel-ddc', [], { stdio: 'inherit' })
 if (process.platform === 'darwin') {
+  execFileSync(
+    'clang',
+    [
+      '-std=c11',
+      '-fobjc-arc',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-framework',
+      'AppKit',
+      '-framework',
+      'CoreGraphics',
+      'native/tests/mac-system-events.m',
+      '-o',
+      '.native-cache/test-mac-system-events',
+    ],
+    { stdio: 'inherit' },
+  )
+  execFileSync('.native-cache/test-mac-system-events', [], { stdio: 'inherit' })
   execFileSync(
     'clang',
     [

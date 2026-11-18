@@ -80,11 +80,12 @@ impl Runtime {
         let this = self.clone();
         let context = link.clone();
         tokio::spawn(async move {
-            while let Some((received, change)) = changes.recv().await {
+            while let Some((generation, received, change)) = changes.recv().await {
                 if !this.current(&context) {
                     break;
                 }
-                this.observe_transition_at(&context, change, received).await;
+                this.observe_engine_transition_at(&context, change, received, generation)
+                    .await;
             }
         });
         let this = self.clone();
@@ -130,22 +131,8 @@ impl Runtime {
                                 break;
                             }
                         }
-                        if line == "connectionState=Connected" {
-                            {
-                                let mut i = this.inner.lock().await;
-                                if this.current(&context) {
-                                    i.state.engine = "ready".into();
-                                }
-                            }
-                            this.publish();
-                        } else if line.starts_with("connectionState=") {
-                            {
-                                let mut i = this.inner.lock().await;
-                                if this.current(&context) {
-                                    i.state.engine = "starting".into();
-                                }
-                            }
-                            this.publish();
+                        if line.starts_with("connectionState=") || line.starts_with("retryIn=") {
+                            this.engine_connection_changed(&context, &line).await;
                         }
                         this.trace("engine.ipc", json!({"line":line})).await;
                     }
@@ -164,11 +151,26 @@ impl Runtime {
                             context.session.close();
                             break;
                         }
+                        if engine::is_input_entry(&line) {
+                            let sequence = context.input_entries.fetch_add(1, Ordering::AcqRel) + 1;
+                            this.trace(
+                                "input.entryObserved",
+                                json!({"session":context.id,"sequence":sequence}),
+                            )
+                            .await;
+                        }
                         if host {
+                            if let Some(change) = parse_engine_transition(&line, "jump") {
+                                this.engine_forced_return(&context, change).await;
+                            }
                             if let Some(change) = parse_transition(&line) {
                                 let _ = this.observed.send((context.id, change.clone()));
                                 if transitions
-                                    .try_send((std::time::Instant::now(), change))
+                                    .try_send((
+                                        context.input_generation.load(Ordering::Acquire),
+                                        std::time::Instant::now(),
+                                        change,
+                                    ))
                                     .is_err()
                                 {
                                     context.session.close();
@@ -176,9 +178,17 @@ impl Runtime {
                                 }
                             }
                         }
+                        if engine::is_transport_diagnostic(&line) {
+                            this.trace(
+                                "engine.transport",
+                                json!({"session":context.id,"line":line}),
+                            )
+                            .await;
+                        }
                         if (lower.contains("failed")
                             || lower.contains("cannot")
-                            || lower.contains("error"))
+                            || lower.contains("error")
+                            || engine::is_socket_failure(&line))
                             && !lower.contains("screenbridge-probe")
                         {
                             this.diagnostic_line(&line).await;

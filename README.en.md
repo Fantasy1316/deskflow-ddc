@@ -8,15 +8,17 @@
 
 Deskflow DDC helps two computers share a monitor, keyboard and mouse. It bundles **Deskflow 1.27.0**, so no separate input-sharing engine installation is needed. Either computer can provide the physical keyboard and mouse; roles are independent of the operating system.
 
-**Version 0.3.2** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
+**Version 0.3.3** · [Downloads](https://github.com/Fantasy1316/deskflow-ddc/releases) · [Changelog, in Chinese](CHANGELOG.md) · [Report an issue](https://github.com/Fantasy1316/deskflow-ddc/issues)
 
 This is an independent project, not affiliated with the [Deskflow](https://github.com/deskflow/deskflow) maintainers. The application uses Rust, Tauri 2 and Vue 3. The current application interface is in Chinese; this README provides English usage instructions.
 
-## What's new in 0.3.2
+## What's new in 0.3.3
 
-- Addresses stuck Shift state, incorrect keys and a failed return shortcut after switching from a Windows provider to Mac. Internal transfers now send only reserved F18 / F19 keys, avoiding synthetic modifiers across a computer switch.
-- Internal transfers accept every combination of physically held Ctrl / Alt / Shift / Win. Partial injection cleanup releases only the reserved key, with regression coverage for roles, crossing policies and modifier states.
-- Upgrade both endpoints to 0.3.2; existing settings and pairing are retained. Update the Windows secure-desktop service if used. Intel Mac support remains experimental and Ubuntu packages remain **Beta**. See the [changelog](CHANGELOG.md) for earlier features.
+- macOS and Windows now use native sleep, wake and display-device notifications. Mac screen wake and user-session activation trigger immediate checks, with periodic scans retained as a fallback.
+- Recovery interrupts reconnect waits and discovery, tries verified addresses first, and reduces unnecessary waits after a display returns. Screen-only wake preserves healthy sharing and the recorded picture source.
+- Improves hesitation and cursor drift when returning from the Windows shared monitor to a separate Mac display. Input ownership now follows forced engine returns after a disconnect, preventing later transfers from being skipped.
+- The bundled Mac engine includes patches for initial cursor placement, capture ordering and heartbeat resets caused by identical configuration reloads, with additional transport and recovery diagnostics.
+- Upgrade both endpoints to 0.3.3; existing settings and pairing are retained. Update the Windows secure-desktop service if used. Intel Mac support remains experimental and Ubuntu packages remain **Beta**. See the [changelog](CHANGELOG.md) for earlier features.
 
 ## Features
 
@@ -63,13 +65,13 @@ If DDC cannot be used, try the experimental compatibility mode below. Monitors w
 
 ## Installation and upgrades
 
-1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.2 on both computers** for full sharing.
+1. Download the package for your system and architecture from [Releases](https://github.com/Fantasy1316/deskflow-ddc/releases). Use **0.3.3 on both computers** for full sharing.
 2. Before upgrading, stop sharing and quit the old applications and any independent Deskflow instances on both computers. This application does not take over engines started by another application.
 3. On macOS, extract and move `Deskflow DDC.app` to Applications, then open it and grant the requested Accessibility/Input Monitoring permissions. Permissions can be checked again from the application. Permission for the main application does not necessarily grant permission to the bundled engine.
 4. On Windows, run the installer, or fully extract the portable package and open `Deskflow DDC.exe`. Keep its DLLs and `resources` directory together. Allow application network access through the firewall; install WebView2 Runtime if it is missing.
 5. If Windows secure-desktop control is enabled, **install/update the background service** from Sharing Settings after upgrading.
 
-Version 0.3.2 retains the 0.2 / 0.3-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
+Version 0.3.3 retains the 0.2 / 0.3-series configuration, device identity, pairing credentials and startup preferences. There is no need to delete configuration. Version 0.1 uses separate data; its device settings can be imported from Devices & Pairing (**设备与配对 → 导入旧版配置**), after which pairing and monitor mappings must be checked again.
 
 The project currently does not provide Developer ID notarization or Windows publisher signing. Your OS may show an unknown-developer warning. Check the individual release and use packages from a trusted source.
 
@@ -137,6 +139,7 @@ Test both directions and retain physical monitor controls, a local keyboard/mous
 ## Screen edges, shortcuts and background operation
 
 - **Screen edges:** arrange the computer tiles in the provider's Sharing Settings. The default keeps video switching manual. Optional modes follow input or move only input when the destination has a separate display. Select each computer's own independent/built-in display locally; do not mark the shared monitor as independent. If the selected display disappears during sleep or unplugging, the engine pauses and reconnection is retried when it returns.
+- **Sleep and display recovery:** macOS and Windows use native sleep, wake and display-device notifications, with timer-gap detection and periodic topology scans as fallbacks. Mac screen wake or session activation immediately checks topology and connectivity. Recovery events interrupt reconnect waits, verified addresses are tried first, and known addresses are retried after a one-second delay. Screen-only wake preserves healthy sharing and the recorded picture source. System sleep pauses the sharing session; wake refreshes display connections and retries reconnection. DDC mode reads the current input again; the output-disconnection fallback requires source confirmation again.
 - **Modifier mapping:** original mapping sends Command as Win and Control as Ctrl. The common-shortcuts option maps a Mac provider's Command to Windows Ctrl, or a Windows provider's Ctrl to Mac Command. Local input and same-OS sharing are unchanged. Shortcuts using different key combinations still follow the destination OS's conventions.
 - **Launch at login:** start in the tray after the user reaches their desktop, not at the first pre-login screen. Put the application in a fixed location before enabling it.
 - **Automatic sharing:** wait/connect using saved settings when the application starts, including waiting for an offline peer. Manual Stop prevents another automatic start during that run. In display-only mode, the option enables monitor control instead.

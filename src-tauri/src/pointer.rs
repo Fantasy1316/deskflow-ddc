@@ -1,5 +1,9 @@
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+pub(crate) mod mac;
+#[cfg(target_os = "macos")]
+pub(crate) mod retained;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -190,29 +194,7 @@ pub fn opposite(side: &str) -> &str {
     }
 }
 #[cfg(target_os = "macos")]
-pub fn cursor() -> Result<Point> {
-    #[repr(C)]
-    struct NativePoint {
-        x: f64,
-        y: f64,
-    }
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
-        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> NativePoint;
-    }
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFRelease(value: *const std::ffi::c_void);
-    }
-    unsafe {
-        let event = CGEventCreate(std::ptr::null());
-        ensure!(!event.is_null(), "无法获取鼠标坐标");
-        let p = CGEventGetLocation(event);
-        CFRelease(event);
-        Ok(Point { x: p.x, y: p.y })
-    }
-}
+pub use mac::cursor;
 #[cfg(target_os = "windows")]
 pub fn cursor() -> Result<Point> {
     #[repr(C)]

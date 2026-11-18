@@ -10,6 +10,7 @@ mod progress;
 pub use output_switch::RestoreRequest as OutputRestoreRequest;
 use progress::{SwitchProgress, SwitchStage};
 mod engine_session;
+mod input_lifecycle;
 #[cfg(target_os = "macos")]
 mod native_edge;
 mod pointer_bridge;
@@ -17,6 +18,7 @@ mod startup;
 mod switch_flow;
 mod switch_protection;
 mod system_control;
+mod system_events;
 
 use crate::{
     diagnostics::Diagnostics,
@@ -250,6 +252,8 @@ struct Link {
     epoch: u64,
     session: Session,
     peer: watch::Sender<Option<Identity>>,
+    input_generation: AtomicU64,
+    input_entries: AtomicU64,
 }
 #[derive(Clone, Debug)]
 struct Transition {
@@ -279,7 +283,7 @@ pub struct Runtime {
     active_session: AtomicU64,
     network: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
     pointer_busy: AtomicBool,
-    topology_busy: AtomicBool,
+    pub(crate) system_events: crate::system_events::Events,
     topology_ready: watch::Sender<bool>,
     display_recovery: Mutex<display_recovery::DisplayRecovery>,
     display_only_history: Mutex<display_only::ToggleHistory>,
@@ -344,7 +348,7 @@ impl Runtime {
             active_session: AtomicU64::new(0),
             network: Mutex::new(None),
             pointer_busy: AtomicBool::new(false),
-            topology_busy: AtomicBool::new(false),
+            system_events: crate::system_events::Events::default(),
             topology_ready: watch::channel(true).0,
             display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
             display_only_history: Mutex::new(display_only::ToggleHistory::default()),
@@ -399,6 +403,7 @@ impl Runtime {
             }
         });
         runtime.start_pointer_poll();
+        runtime.start_system_events();
         Ok(runtime)
     }
     pub async fn snapshot(&self) -> Snapshot {
@@ -655,6 +660,14 @@ impl Runtime {
         Ok(())
     }
     pub async fn discover(&self) -> Result<()> {
+        self.discover_until(std::future::pending())
+            .await
+            .map(|_| ())
+    }
+    async fn discover_until(
+        &self,
+        interrupt: impl std::future::Future<Output = ()>,
+    ) -> Result<bool> {
         ensure!(
             self.snapshot().await.config.mode == OperationMode::Sharing,
             "仅切换显示器模式无需设备发现"
@@ -662,20 +675,27 @@ impl Runtime {
         self.inner.lock().await.state.discovering = true;
         self.publish();
         let result = async {
-            let mut discovery = self.discovery.lock().await;
+            tokio::pin!(interrupt);
+            let mut discovery = tokio::select! {
+                biased;
+                _ = &mut interrupt => return Ok((vec![], true)),
+                discovery = self.discovery.lock() => discovery,
+            };
             if discovery.is_none() {
                 *discovery = Some(Discovery::new()?);
             }
             discovery
                 .as_ref()
                 .unwrap()
-                .browse(Duration::from_secs(2))
+                .browse_until(Duration::from_secs(2), interrupt)
                 .await
         }
         .await;
         let mut i = self.inner.lock().await;
         i.state.discovering = false;
-        if let Ok(devices) = &result {
+        // Interrupted enumeration is incomplete. Keep the previous hints while
+        // ensuring the mDNS subscription and UI busy state have been released.
+        if let Ok((devices, false)) = &result {
             i.state.discovered_devices = devices
                 .iter()
                 .filter(|d| d.id != i.state.device_id)
@@ -683,7 +703,7 @@ impl Runtime {
                 .collect();
         }
         self.publish();
-        result.map(|_| ())
+        result.map(|(_, interrupted)| interrupted)
     }
     pub async fn import_config(&self, file: PathBuf) -> Result<()> {
         let mut i = self.inner.lock().await;
@@ -717,6 +737,7 @@ impl Runtime {
             && self.active_session.load(Ordering::Acquire) == link.id
             && !link.session.closed.is_cancelled()
             && *self.topology_ready.borrow()
+            && self.system_events.ready()
     }
     async fn identity(&self) -> Result<Identity> {
         let i = self.inner.lock().await;
@@ -749,6 +770,7 @@ impl Runtime {
     }
     pub async fn start(self: &Arc<Self>, pairing: Option<String>) -> Result<()> {
         let _lifecycle = self.start_stop.lock().await;
+        self.ensure_system_awake()?;
         ensure!(
             !self.snapshot().await.emergency_stopping,
             "正在停止共享并恢复输出"
@@ -833,6 +855,7 @@ impl Runtime {
             None
         };
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.ensure_system_awake()?;
         self.topology_ready.send_replace(true);
         let cancel = CancellationToken::new();
 
@@ -1061,10 +1084,13 @@ fn distance(a: Point, b: Point) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 fn parse_transition(line: &str) -> Option<Transition> {
-    let re = regex::Regex::new(
-        r#"switch from "sb-([a-f0-9-]{36})" to "sb-([a-f0-9-]{36})"(?: at (-?\d+),(-?\d+))?"#,
-    )
-    .ok()?;
+    parse_engine_transition(line, "switch")
+}
+fn parse_engine_transition(line: &str, kind: &str) -> Option<Transition> {
+    let pattern = format!(
+        r#"{kind} from "sb-([a-f0-9-]{{36}})" to "sb-([a-f0-9-]{{36}})"(?: at (-?\d+),(-?\d+))?"#
+    );
+    let re = regex::Regex::new(&pattern).ok()?;
     let m = re.captures(line)?;
     Some(Transition {
         from: m[1].into(),
@@ -1415,6 +1441,16 @@ mod tests {
             .position
             .is_none());
         assert!(parse_transition("switch from foo to bar").is_none());
+    }
+    #[test]
+    fn forced_jump_is_distinct_from_normal_edges_in_engine_logs() {
+        let line = r#"[2026-11-18T15:11:17.804] INFO: jump from "sb-11111111-1111-1111-1111-111111111111" to "sb-22222222-2222-2222-2222-222222222222" at 750,400"#;
+        assert!(parse_transition(line).is_none());
+        let change = parse_engine_transition(line, "jump").unwrap();
+        assert_eq!(change.to, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(change.position, Some(Point { x: 750.0, y: 400.0 }));
+        assert!(parse_engine_transition(&line.replace("jump", "switch"), "jump").is_none());
+        assert!(parse_transition(&line.replace("jump", "switch")).is_some());
     }
     #[test]
     fn manual_video_shortcut_checks_windows_receiver_even_with_edges_disabled() {

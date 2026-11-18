@@ -64,6 +64,7 @@ impl Runtime {
         );
         self.discovery.lock().await.take();
         self.transfers.suspend().await;
+        self.ensure_system_awake()?;
         *self.display_only_history.lock().await = ToggleHistory::default();
         {
             let mut i = self.inner.lock().await;
@@ -83,6 +84,7 @@ impl Runtime {
         let Ok(_lifecycle) = self.start_stop.try_lock() else {
             bail!("正在处理其他操作，请稍候再切换");
         };
+        self.ensure_system_awake()?;
         let state = self.snapshot().await;
         ensure!(!state.emergency_stopping, "正在停止共享并恢复输出");
         let epoch = self.epoch.load(Ordering::Acquire);
@@ -140,6 +142,7 @@ impl Runtime {
         }
         .context("输入源未配置")?;
         let target = if local { "local" } else { "peer" };
+        self.ensure_system_awake()?;
         let protection = self.switch_protection.enter(Some(target))?;
         {
             let mut i = self.inner.lock().await;
@@ -169,7 +172,7 @@ impl Runtime {
             .settle_display(&protection, None, target, result.is_ok())
             .await;
         ensure!(
-            self.epoch.load(Ordering::Acquire) == epoch,
+            self.epoch.load(Ordering::Acquire) == epoch && self.system_events.ready(),
             "切换已取消，正在恢复输出"
         );
         if result.is_ok() {

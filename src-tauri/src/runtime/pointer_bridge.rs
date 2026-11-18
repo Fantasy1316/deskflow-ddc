@@ -1,6 +1,20 @@
 use super::*;
 
+fn poll_landing_allowed(s: &Snapshot, command_pending: bool) -> bool {
+    keep_mode(s)
+        && s.engine == "ready"
+        && s.active_device_id.as_deref() == Some(&s.device_id)
+        && s.display_device_id.as_deref() == s.peer.as_ref().map(|p| p.id.as_str())
+        && s.display_status != "uncertain"
+        && !command_pending
+}
+
 impl Runtime {
+    fn pointer_session_current(&self, id: u64) -> bool {
+        self.active_session.load(Ordering::Acquire) == id
+            && self.system_events.ready()
+            && *self.topology_ready.borrow()
+    }
     async fn shared_pointer_target(&self, link: &Link, position: f64) -> Result<Point> {
         let s = self.snapshot().await;
         ensure!(self.current(link), "共享会话已结束");
@@ -19,11 +33,100 @@ impl Runtime {
         self.platform.point(point.x, point.y).await
     }
     pub(super) async fn land(&self, id: u64) -> Result<()> {
+        self.land_at(id, None).await
+    }
+    pub(super) async fn land_at(&self, id: u64, entry: Option<Point>) -> Result<()> {
+        ensure!(self.pointer_session_current(id), "共享会话已结束");
+        #[cfg(target_os = "macos")]
+        {
+            let s = self.snapshot().await;
+            // The provider's physical cursor is already returning natively.
+            // Correct only its invisible aggregate-desktop landing, without
+            // helper startup latency or a delayed second jump over user motion.
+            // Receivers and explicit keyboard/video switches keep their paths.
+            if s.config.role == "host" {
+                let mut transitions = self.observed.subscribe();
+                let retained =
+                    &pointer::selected(&s.cursor_displays, &s.config.retained_display_id)
+                        .context("所选独立屏幕不可用")?
+                        .bounds;
+                let side = local_side(&s);
+                let point = pointer::retained::arrival(
+                    &s.cursor_displays,
+                    retained,
+                    side,
+                    entry,
+                    || self.platform.return_cursor(entry.is_some()),
+                    || self.pointer_session_current(id),
+                )
+                .await?;
+                ensure!(self.pointer_session_current(id), "共享会话已结束");
+                if point.is_some() {
+                    let current = self.inner.lock().await;
+                    // Topology refresh can run while awaiting native entry.
+                    // Never apply a point computed for an obsolete layout.
+                    if current.state.config.role != "host"
+                        || current.state.cursor_displays != s.cursor_displays
+                        || current.state.config.retained_display_id != s.config.retained_display_id
+                        || local_side(&current.state) != side
+                        || pointer::selected(
+                            &current.state.cursor_displays,
+                            &current.state.config.retained_display_id,
+                        )
+                        .is_none_or(|panel| &panel.bounds != retained)
+                        || (entry.is_none()
+                            && !poll_landing_allowed(
+                                &current.state,
+                                self.command_pending.load(Ordering::Acquire),
+                            ))
+                    {
+                        return Ok(());
+                    }
+                    drop(current);
+                    ensure!(self.pointer_session_current(id), "共享会话已结束");
+                    // The native stream is independent of the effect queue.
+                    // A rapid second crossing can already have left this Mac
+                    // while its observer waits for our effects lock.
+                    loop {
+                        match transitions.try_recv() {
+                            Ok((session, change)) if session == id && change.to != s.device_id => {
+                                return Ok(())
+                            }
+                            Ok(_) => {}
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(_) => return Ok(()),
+                        }
+                    }
+                    // Sample again after the state lock: user motion during
+                    // contention must not be overwritten by an older point.
+                    let Some(cursor) = self.platform.return_cursor(entry.is_some())? else {
+                        return Ok(());
+                    };
+                    let Some(point) = pointer::retained::target(
+                        &s.cursor_displays,
+                        retained,
+                        side,
+                        entry,
+                        cursor,
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    ensure!(self.pointer_session_current(id), "共享会话已结束");
+                    self.platform.return_point(point).await?;
+                    self.trace(
+                        "input.retainedEntry",
+                        json!({"entry":entry,"position":point,"pictureVerified":false}),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = entry;
         tokio::time::sleep(Duration::from_millis(80)).await;
-        ensure!(
-            self.active_session.load(Ordering::Acquire) == id,
-            "共享会话已结束"
-        );
+        ensure!(self.pointer_session_current(id), "共享会话已结束");
         let s = self.snapshot().await;
         let b = &pointer::selected(&s.cursor_displays, &s.config.retained_display_id)
             .context("所选独立屏幕不可用")?
@@ -34,10 +137,7 @@ impl Runtime {
     }
     pub(super) async fn recover_pointer(&self, id: u64) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(80)).await;
-        ensure!(
-            self.active_session.load(Ordering::Acquire) == id,
-            "共享会话已结束"
-        );
+        ensure!(self.pointer_session_current(id), "共享会话已结束");
         let s = self.snapshot().await;
         if s.display_status == "uncertain" || s.display_device_id.as_deref() != Some(&s.device_id) {
             return Ok(());
@@ -60,27 +160,10 @@ impl Runtime {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut previous: Option<Point> = None;
             let mut cooldown = tokio::time::Instant::now();
-            let mut topology = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = this.shutdown.cancelled() => break,
                     _ = interval.tick() => {}
-                }
-                if this
-                    .display_recovery
-                    .lock()
-                    .await
-                    .observe(std::time::SystemTime::now())
-                {
-                    *this.display_only_history.lock().await =
-                        display_only::ToggleHistory::default();
-                    if this.inner.lock().await.state.config.display_method == DisplayMethod::Signal
-                    {
-                        this.inner.lock().await.state.reset_display();
-                        this.publish();
-                    }
-                    this.trace("display.resumeDetected", json!({"pictureVerified":false}))
-                        .await;
                 }
                 // Sampling never clones the log history or starts a subprocess.
                 let (running, selected) = {
@@ -93,34 +176,31 @@ impl Runtime {
                         && s.display_device_id.as_deref() == s.peer.as_ref().map(|p| p.id.as_str())
                         && !this.command_pending.load(Ordering::Acquire);
                     (
-                        s.running && s.config.mode == OperationMode::Sharing,
+                        s.running
+                            && s.config.mode == OperationMode::Sharing
+                            && this.system_events.ready(),
                         if enabled {
                             pointer::selected(&s.cursor_displays, &s.config.retained_display_id)
-                                .map(|panel| (panel.clone(), local_side(s).to_owned()))
+                                .map(|panel| {
+                                    (
+                                        panel.clone(),
+                                        local_side(s).to_owned(),
+                                        cfg!(target_os = "macos") && s.config.role == "host",
+                                    )
+                                })
                         } else {
                             None
                         },
                     )
                 };
-                if running
-                    && topology.elapsed() > Duration::from_secs(5)
-                    && !this.topology_busy.swap(true, Ordering::AcqRel)
-                {
-                    topology = tokio::time::Instant::now();
-                    let rt = this.clone();
-                    tokio::spawn(async move {
-                        let _ = rt.refresh_topology().await;
-                        rt.refresh_display_after_resume().await;
-                        rt.topology_busy.store(false, Ordering::Release);
-                    });
-                }
-                if this.pointer_busy.load(Ordering::Acquire)
+                if !running
+                    || this.pointer_busy.load(Ordering::Acquire)
                     || tokio::time::Instant::now() < cooldown
                 {
                     previous = None;
                     continue;
                 }
-                let Some((panel, side)) = selected else {
+                let Some((panel, side, fast_return)) = selected else {
                     previous = None;
                     continue;
                 };
@@ -132,7 +212,15 @@ impl Runtime {
                 previous = Some(point);
                 if position.is_some() || !panel.bounds.contains(point) {
                     previous = None;
-                    cooldown = tokio::time::Instant::now() + Duration::from_millis(650);
+                    // Local return repair is not an outward crossing. Do not
+                    // block an intentional immediate trip back to the peer for
+                    // 650ms when a late native entry needed poll recovery.
+                    cooldown = tokio::time::Instant::now()
+                        + Duration::from_millis(if fast_return && position.is_none() {
+                            16
+                        } else {
+                            650
+                        });
                     this.pointer_busy.store(true, Ordering::Release);
                     let rt = this.clone();
                     tokio::spawn(async move {
@@ -147,28 +235,56 @@ impl Runtime {
     }
     pub(super) async fn refresh_topology(&self) -> Result<()> {
         let epoch = self.epoch.load(Ordering::Acquire);
+        let generation = self.system_events.state().generation;
         let panels: Vec<Panel> = serde_json::from_value(self.platform.screens().await?)?;
-        self.apply_topology(epoch, panels).await;
+        self.apply_topology_generation(epoch, generation, panels)
+            .await;
         Ok(())
     }
+    #[cfg(test)]
     pub(super) async fn apply_topology(&self, epoch: u64, panels: Vec<Panel>) {
+        self.apply_topology_generation(epoch, self.system_events.state().generation, panels)
+            .await;
+    }
+    async fn apply_topology_generation(&self, epoch: u64, generation: u64, panels: Vec<Panel>) {
         // Serialize against explicit stop/start so an old scan cannot suspend a
         // newly started session or re-enable sharing after the user stopped it.
         let _lifecycle = self.start_stop.lock().await;
-        if self.epoch.load(Ordering::Acquire) != epoch {
+        if self.epoch.load(Ordering::Acquire) != epoch
+            || self.system_events.state().generation != generation
+            || !self.system_events.ready()
+        {
             return;
         }
         let mut i = self.inner.lock().await;
-        let missing = i.state.running
-            && i.state.config.mode == OperationMode::Sharing
+        if self.system_events.state().generation != generation || !self.system_events.ready() {
+            return;
+        }
+        let sharing = i.state.running && i.state.config.mode == OperationMode::Sharing;
+        let missing = sharing
             && !i.state.config.retained_display_id.is_empty()
             && pointer::selected(&panels, &i.state.config.retained_display_id).is_none();
-        if i.state.cursor_displays != panels {
+        let changed = i.state.cursor_displays != panels;
+        if changed {
             i.state.cursor_displays = panels;
             self.publish();
         }
-        let was_ready = self.topology_ready.send_replace(!missing);
+        // Keep the engine's first-entry mapping in step with a live layout
+        // change. The native reader independently rejects obsolete CG bounds.
+        let route = changed.then(|| self.update_primary_route(&i.state));
+        let was_ready = *self.topology_ready.borrow();
+        self.topology_ready.send_if_modified(|ready| {
+            if *ready == !missing {
+                return false;
+            }
+            *ready = !missing;
+            true
+        });
         drop(i);
+        if let Some(Err(error)) = route {
+            self.log("error", &format!("更新本机鼠标落点失败：{error:#}"))
+                .await;
+        }
         if missing {
             // Sleep can temporarily remove every active display. Release the
             // current input session, but keep the listener/retry loop and the
@@ -183,7 +299,8 @@ impl Runtime {
                 )
                 .await;
             }
-        } else if !was_ready {
+        } else if !was_ready && sharing {
+            self.system_events.request_connection_check();
             self.display_recovery.lock().await.mark();
             self.log("info", "独立屏幕已恢复，正在自动重连").await;
         }
@@ -202,6 +319,16 @@ impl Runtime {
                     .map(|_| ())
             }
         } else {
+            let _effects = self.effects.lock().await;
+            let s = self.snapshot().await;
+            // Sampling precedes this task and can be stale by the time it is
+            // scheduled. Never let a poll warp input during an explicit move,
+            // after a video change, or after the sharing session was replaced.
+            if !self.current(&link)
+                || !poll_landing_allowed(&s, self.command_pending.load(Ordering::Acquire))
+            {
+                return Ok(());
+            }
             self.land(link.id).await
         }
     }
@@ -259,7 +386,7 @@ pub(super) mod tests {
             active_session: AtomicU64::new(1),
             network: Mutex::new(None),
             pointer_busy: AtomicBool::new(false),
-            topology_busy: AtomicBool::new(false),
+            system_events: crate::system_events::Events::default(),
             topology_ready: watch::channel(true).0,
             display_recovery: Mutex::new(display_recovery::DisplayRecovery::default()),
             display_only_history: Mutex::new(display_only::ToggleHistory::default()),
@@ -293,6 +420,222 @@ pub(super) mod tests {
         }]
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn native_return_preserves_motion_and_video_for_manual_keep_and_settling_follow() {
+        use std::os::unix::fs::PermissionsExt;
+        for video in ["manual", "keep", "follow"] {
+            for method in [DisplayMethod::Ddc, DisplayMethod::Signal] {
+                let dir = tempfile::tempdir().unwrap();
+                let rt = fixture(dir.path(), "host");
+                let local = rt.snapshot().await.device_id;
+                {
+                    let mut i = rt.inner.lock().await;
+                    i.state.engine = "ready".into();
+                    i.state.config.display_method = method;
+                    i.state.config.retained_display_id = "1".into();
+                    i.state.session_layout = Some(Layout {
+                        host_side: "left".into(),
+                        video: video.into(),
+                    });
+                    i.state.active_device_id = Some("receiver".into());
+                    i.state.peer = Some(Peer {
+                        id: "receiver".into(),
+                        name: "Windows".into(),
+                        platform: "win32".into(),
+                        fingerprint: "a".repeat(64),
+                        file_transfer: false,
+                        lock_control: false,
+                        input_configured: true,
+                        retained_display: false,
+                        modifier_mapping: ModifierMapping::Original,
+                    });
+                    i.state.cursor_displays = vec![
+                        Panel {
+                            id: "1".into(),
+                            name: "Internal".into(),
+                            internal: true,
+                            bounds: pointer::Bounds {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 1512.0,
+                                height: 982.0,
+                            },
+                        },
+                        Panel {
+                            id: "3".into(),
+                            name: "Shared".into(),
+                            internal: false,
+                            bounds: pointer::Bounds {
+                                x: 1512.0,
+                                y: 80.0,
+                                width: 1920.0,
+                                height: 1080.0,
+                            },
+                        },
+                    ];
+                }
+                let entry = Point {
+                    x: 3426.0,
+                    y: 600.0,
+                };
+                let moved = Point {
+                    x: 3406.0,
+                    y: 610.0,
+                };
+                rt.platform
+                    .test_return_samples(vec![None, Some(entry), Some(moved), Some(moved)]);
+                let helper = rt.platform.resources.join("native/bin/mac-hotkey");
+                std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &helper,
+                    "#!/bin/sh\n[ \"$1\" = pointer ] || exit 9\necho \"$*\" >> \"$0.calls\"\n",
+                )
+                .unwrap();
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let (remote, mut requests) = attach_with_requests(&rt).await;
+                let link = rt.link.lock().await.clone().unwrap();
+                // Follow mode during display settling still permits an
+                // independent visible screen return, without another write.
+                let protection =
+                    (video == "follow").then(|| rt.switch_protection.enter(None).unwrap());
+                rt.observe_transition(
+                    &link,
+                    Transition {
+                        from: "receiver".into(),
+                        to: local.clone(),
+                        position: Some(entry),
+                    },
+                )
+                .await;
+                let calls = std::fs::read_to_string(helper.with_extension("calls")).unwrap();
+                let args: Vec<_> = calls.split_whitespace().collect();
+                assert_eq!(args.len(), 3, "one movement-only correction");
+                assert_eq!(args[0], "pointer");
+                assert_eq!(args[1].parse::<f64>().unwrap(), 1485.0);
+                assert!(
+                    (args[2].parse::<f64>().unwrap() - (600.0 / 1159.0 * 981.0 + 10.0)).abs()
+                        < 1e-9
+                );
+                let s = rt.snapshot().await;
+                assert_eq!(s.active_device_id.as_ref(), Some(&local));
+                assert_eq!(s.display_device_id.as_deref(), Some("receiver"));
+                assert_eq!(s.display_status, "commanded");
+                while let Ok(message) = requests.try_recv() {
+                    assert!(
+                        matches!(message, Incoming::Event { .. }),
+                        "no peer landing or video request"
+                    );
+                }
+                assert!(!rt.platform.mac_ddc_helper().exists());
+                // A duplicate transition and the ordinary pointer poll must
+                // never pull a cursor already inside the retained screen back.
+                rt.platform.test_return_samples(vec![Some(Point {
+                    x: 1400.0,
+                    y: 500.0,
+                })]);
+                rt.observe_transition(
+                    &link,
+                    Transition {
+                        from: "receiver".into(),
+                        to: local.clone(),
+                        position: Some(entry),
+                    },
+                )
+                .await;
+                rt.land(link.id).await.unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(helper.with_extension("calls")).unwrap(),
+                    calls
+                );
+                rt.active_session.store(link.id + 1, Ordering::Release);
+                assert!(rt.land_at(link.id, Some(entry)).await.is_err());
+                assert_eq!(
+                    std::fs::read_to_string(helper.with_extension("calls")).unwrap(),
+                    calls
+                );
+                drop(protection);
+                remote.close();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn queued_pointer_poll_rechecks_ownership_video_and_command_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = fixture(dir.path(), "host");
+        let local = rt.snapshot().await.device_id;
+        {
+            let mut i = rt.inner.lock().await;
+            i.state.engine = "ready".into();
+            i.state.active_device_id = Some(local.clone());
+            i.state.session_layout = Some(Layout {
+                host_side: "left".into(),
+                video: "manual".into(),
+            });
+            i.state.peer = Some(Peer {
+                id: "receiver".into(),
+                name: "Windows".into(),
+                platform: "win32".into(),
+                fingerprint: "a".repeat(64),
+                file_transfer: false,
+                lock_control: false,
+                input_configured: true,
+                retained_display: false,
+                modifier_mapping: ModifierMapping::Original,
+            });
+        }
+        let remote = attach(&rt).await;
+        for blocked in [
+            "command",
+            "input",
+            "video",
+            "uncertain",
+            "engine",
+            "follow",
+            "topology",
+        ] {
+            let effects = rt.effects.lock().await;
+            let polling = rt.clone();
+            let task = tokio::spawn(async move { polling.poll_effect(None).await });
+            tokio::task::yield_now().await;
+            let original = rt.snapshot().await;
+            match blocked {
+                "command" => rt.command_pending.store(true, Ordering::Release),
+                "input" => rt.inner.lock().await.state.active_device_id = Some("receiver".into()),
+                "video" => rt.inner.lock().await.state.display_device_id = Some(local.clone()),
+                "uncertain" => rt.inner.lock().await.state.display_status = "uncertain".into(),
+                "engine" => rt.inner.lock().await.state.engine = "starting".into(),
+                "follow" => {
+                    rt.inner
+                        .lock()
+                        .await
+                        .state
+                        .session_layout
+                        .as_mut()
+                        .unwrap()
+                        .video = "follow".into()
+                }
+                "topology" => {
+                    rt.topology_ready.send_replace(false);
+                }
+                _ => unreachable!(),
+            }
+            rt.platform.test_return_samples(vec![Some(Point {
+                x: 2000.0,
+                y: 500.0,
+            })]);
+            drop(effects);
+            // No helper exists: a stale poll attempting a warp would fail.
+            task.await.unwrap().unwrap();
+            rt.inner.lock().await.state = original;
+            rt.command_pending.store(false, Ordering::Release);
+            rt.topology_ready.send_replace(true);
+        }
+        remote.close();
+    }
+
     pub(in crate::runtime) async fn attach_with_requests(
         runtime: &Runtime,
     ) -> (Session, mpsc::Receiver<Incoming>) {
@@ -314,6 +657,8 @@ pub(super) mod tests {
             id: runtime.active_session.load(Ordering::Acquire),
             session: local,
             peer: watch::channel(None).0,
+            input_generation: AtomicU64::new(0),
+            input_entries: AtomicU64::new(0),
         }));
         (remote, incoming)
     }
@@ -1151,5 +1496,24 @@ pub(super) mod tests {
         runtime.apply_topology(1, vec![]).await;
         assert!(*runtime.topology_ready.borrow());
         assert!(!runtime.snapshot().await.cursor_displays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_new_native_notification_invalidates_an_in_flight_topology_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = fixture(directory.path(), "host");
+        runtime.inner.lock().await.state.cursor_displays = panels();
+        let generation = runtime.system_events.state().generation;
+        runtime
+            .system_events
+            .emit(crate::system_events::Event::Displays);
+        runtime
+            .apply_topology_generation(1, generation, vec![])
+            .await;
+        assert!(!runtime.snapshot().await.cursor_displays.is_empty());
+        assert!(*runtime.topology_ready.borrow());
+        // Fresh results still pause when the selected independent display is gone.
+        runtime.apply_topology(1, vec![]).await;
+        assert!(!*runtime.topology_ready.borrow());
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub(super) struct ReadbackUnavailable(anyhow::Error);
@@ -14,24 +14,11 @@ impl std::error::Error for ReadbackUnavailable {}
 // Keep the source invalidated until a fresh read, regardless of wake duration.
 #[derive(Default)]
 pub(super) struct DisplayRecovery {
-    last_activity: Option<SystemTime>,
     pending: Option<Instant>,
     detected: Option<Instant>,
 }
 
 impl DisplayRecovery {
-    pub(super) fn observe(&mut self, now: SystemTime) -> bool {
-        // Wall time includes sleep on macOS, unlike some monotonic clocks.
-        let resumed = self.last_activity.replace(now).is_some_and(|previous| {
-            now.duration_since(previous)
-                .is_ok_and(|gap| gap >= Duration::from_secs(5))
-        });
-        if resumed {
-            self.mark();
-        }
-        resumed
-    }
-
     pub(super) fn mark(&mut self) {
         self.pending = Some(Instant::now());
         self.detected = None;
@@ -84,10 +71,11 @@ impl Runtime {
     }
 
     async fn detect_resumed_source(&self, link: &Link, token: Instant) -> Result<String> {
+        let power = self.system_events.state().power;
         let source = self.query_display_source(link).await?;
         let mut recovery = self.display_recovery.lock().await;
         ensure!(
-            recovery.pending() == Some(token),
+            recovery.pending() == Some(token) && self.system_events.state().power == power,
             "显示器连接再次变化，请稍后重试"
         );
         let mut i = self.inner.lock().await;
@@ -104,6 +92,9 @@ impl Runtime {
     }
 
     pub(super) async fn refresh_display_after_resume(&self) {
+        if !self.system_events.ready() {
+            return;
+        }
         let Some(token) = ({
             let recovery = self.display_recovery.lock().await;
             recovery
@@ -116,6 +107,9 @@ impl Runtime {
             return;
         };
         let _effects = self.effects.lock().await;
+        if !self.system_events.ready() {
+            return;
+        }
         let s = self.snapshot().await;
         if s.config.display_method == DisplayMethod::Signal {
             // Sleep invalidates user-confirmed routing. Release the old lease
@@ -124,8 +118,12 @@ impl Runtime {
                 self.log("error", &format!("唤醒后恢复显示输出失败：{error:#}"))
                     .await;
             }
-            if let Some(link) = self.link.lock().await.as_ref() {
-                link.session.close();
+            if s.display_device_id.is_some() {
+                // Native power handling already closed the sleeping session.
+                // Don't tear down a fresh, still-unconfirmed reconnect again.
+                if let Some(link) = self.link.lock().await.as_ref() {
+                    link.session.close();
+                }
             }
             self.inner.lock().await.state.reset_display();
             self.display_recovery.lock().await.complete(token);
@@ -230,6 +228,27 @@ mod tests {
             runtime.display_recovery.lock().await.mark();
             runtime.refresh_display_after_resume().await;
             assert!(link.session.closed.is_cancelled());
+            assert!(runtime.display_recovery.lock().await.pending().is_none());
+            assert!(runtime.snapshot().await.display_device_id.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_resume_scan_does_not_disconnect_a_fresh_unconfirmed_session() {
+        for role in ["host", "client"] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = super::super::pointer_bridge::tests::fixture(directory.path(), role);
+            {
+                let mut i = runtime.inner.lock().await;
+                i.state.config.display_method = DisplayMethod::Signal;
+                i.state.reset_display();
+            }
+            let (_remote, _) =
+                super::super::pointer_bridge::tests::attach_with_requests(&runtime).await;
+            let link = runtime.link.lock().await.as_ref().unwrap().clone();
+            runtime.display_recovery.lock().await.mark();
+            runtime.refresh_display_after_resume().await;
+            assert!(!link.session.closed.is_cancelled());
             assert!(runtime.display_recovery.lock().await.pending().is_none());
             assert!(runtime.snapshot().await.display_device_id.is_none());
         }
@@ -546,21 +565,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn sleep_gap_arms_recovery_but_normal_ticks_and_clock_rollback_do_not() {
-        let mut state = DisplayRecovery::default();
-        let now = SystemTime::now();
-        assert!(!state.observe(now));
-        assert!(!state.observe(now + Duration::from_millis(16)));
-        assert!(state.pending().is_none());
-        assert!(state.observe(now + Duration::from_secs(60)));
-        let token = state.pending().unwrap();
-        assert!(!state.observe(now));
-        assert_eq!(state.pending(), Some(token));
-        state.complete(token);
-        assert!(state.pending().is_none());
     }
 
     #[test]

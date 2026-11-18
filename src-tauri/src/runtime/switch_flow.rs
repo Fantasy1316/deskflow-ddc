@@ -104,6 +104,10 @@ impl Runtime {
             return;
         }
         let s = self.snapshot().await;
+        if let Err(error) = self.update_primary_route(&s) {
+            self.log("error", &format!("更新本机鼠标落点失败：{error:#}"))
+                .await;
+        }
         let mut payload = json!({"active":s.active_device_id,"display":s.display_device_id,"lastDisplay":s.last_display_device_id,"displayStatus":s.display_status,"busy":s.switching||self.command_pending.load(Ordering::Acquire),"error":error});
         // Legacy DDC peers reject unknown fields. Signal peers negotiate the
         // matching output protocol before exchanging this additional state.
@@ -192,14 +196,30 @@ impl Runtime {
         self.observe_transition_at(link, change, std::time::Instant::now())
             .await;
     }
+    #[cfg(test)]
     pub(super) async fn observe_transition_at(
         self: &Arc<Self>,
         link: &Arc<Link>,
         change: Transition,
         received: std::time::Instant,
     ) {
+        self.observe_engine_transition_at(
+            link,
+            change,
+            received,
+            link.input_generation.load(Ordering::Acquire),
+        )
+        .await;
+    }
+    pub(super) async fn observe_engine_transition_at(
+        self: &Arc<Self>,
+        link: &Arc<Link>,
+        change: Transition,
+        received: std::time::Instant,
+        generation: u64,
+    ) {
         let effects = self.effects.lock().await;
-        if !self.current(link) {
+        if !self.current(link) || link.input_generation.load(Ordering::Acquire) != generation {
             return;
         }
         let s = self.snapshot().await;
@@ -275,7 +295,7 @@ impl Runtime {
                 }
                 crate::switching::Effect::Land => {
                     if change.to == s.device_id {
-                        self.land(link.id).await?;
+                        self.land_at(link.id, change.position).await?;
                     } else {
                         link.session
                             .request("land-pointer", Value::Null, Duration::from_secs(10))
@@ -286,7 +306,12 @@ impl Runtime {
             Ok(effect)
         }
         .await;
-        if !self.current(link) {
+        if !self.current(link) || link.input_generation.load(Ordering::Acquire) != generation {
+            drop(protection);
+            if self.current(link) && !self.command_pending.load(Ordering::Acquire) {
+                self.inner.lock().await.state.switching = self.switch_protection.busy();
+                self.publish_control(link, None).await;
+            }
             return;
         }
         let wrote_display = matches!(result.as_ref(), Ok(crate::switching::Effect::Write));
@@ -306,7 +331,7 @@ impl Runtime {
         };
         {
             let mut i = self.inner.lock().await;
-            if !self.current(link) {
+            if !self.current(link) || link.input_generation.load(Ordering::Acquire) != generation {
                 return;
             }
             i.state.active_device_id = active;
@@ -460,7 +485,9 @@ impl Runtime {
             "正在切换，请稍后"
         );
         let started = std::time::Instant::now();
+        let generation = link.input_generation.load(Ordering::Acquire);
         let result=async {
+            if self.command_pending.load(Ordering::Acquire) { self.disable_primary_route()?; }
             let mut completed=self.completed.subscribe();
             ensure!(self.current(link),"共享会话已结束");
             if native_edge {
@@ -484,6 +511,7 @@ impl Runtime {
                 _=link.session.closed.cancelled()=>bail!("共享会话已结束"),
                 result=tokio::time::timeout(Duration::from_secs(12),wait)=>result.context("未收到 Deskflow 键鼠转移确认；请停止共享后重新连接，若再次发生请导出诊断日志")?,
             }?;
+            ensure!(link.input_generation.load(Ordering::Acquire) == generation && self.snapshot().await.engine == "ready", "键鼠连接已中断，请等待重新连接");
             if let Some(position) = cross.filter(|_| gated_edge && !native_edge) {
                 // This destination has no unconditional native edge. Transfer
                 // only after the visibility check above, then restore its entry
@@ -949,7 +977,9 @@ mod tests {
                         );
                         let calls = std::fs::read_to_string(input.with_extension("calls")).unwrap();
                         let calls: Vec<_> = calls.lines().collect();
-                        assert_eq!(calls.len(), if !writes && target_local { 2 } else { 1 });
+                        // This fixture has just one visible Mac panel. Native
+                        // entry is already on it; do not issue a second warp.
+                        assert_eq!(calls.len(), 1);
                         assert_eq!(
                             calls[0].split_whitespace().next().unwrap(),
                             if target_local { "host" } else { "pointer" }

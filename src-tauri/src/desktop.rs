@@ -519,6 +519,9 @@ fn finish_quit(app: &tauri::AppHandle, stopped: bool) {
     // Decide whether to reply to Cocoa on its main thread, after cleanup.
     let _ = app.run_on_main_thread(move || {
         if stopped {
+            if let Some(monitor) = handle.try_state::<crate::system_events::native::Monitor>() {
+                monitor.stop();
+            }
             handle.state::<ExitState>().complete();
         }
         #[cfg(target_os = "macos")]
@@ -728,6 +731,13 @@ pub fn run() {
                 }
             };
             app.manage(runtime.clone());
+            match crate::system_events::native::Monitor::install(runtime.system_events.clone()) {
+                Ok(monitor) => {
+                    app.manage(monitor);
+                    tauri::async_runtime::block_on(runtime.trace("system.nativeNotifications", json!({"enabled": cfg!(any(target_os = "macos", windows))})));
+                },
+                Err(error) => tauri::async_runtime::block_on(runtime.log("error", &format!("原生系统通知不可用，将使用轮询兜底：{error:#}"))),
+            }
             if let Err(error) = tauri::async_runtime::block_on(runtime.refresh_windows_service()) {
                 tauri::async_runtime::block_on(runtime.log("error", &format!("后台服务检测失败，普通共享仍可使用：{error}")));
             }
